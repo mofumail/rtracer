@@ -138,9 +138,23 @@ def Cam.step.raw(up: Bool, +v: U32, +dn: U32) -> U32:
 def Cam.pitch_step(+v: U32, +dn: U32, up: Bool) -> U32:
   Cam.pitch_clamp(Cam.step.raw(up, v, dn))
 
-# Yaw wraps instead of clamping.
+# Yaw wraps instead of clamping, so it needs its own stepper: `Cam.step.raw`
+# saturates at zero on the way down, which is right for pitch and wrong here.
+# Reusing it meant dragging left walked the yaw down to 0 and stuck there,
+# while dragging right wrapped forever.
+#
+# Both operands are reduced modulo a full turn first, so `v + WRAP - d` cannot
+# underflow a U32.
+def Cam.yaw_step.go(up: Bool, +v: U32, +d: U32) -> U32:
+  match up:
+    case True{}:
+      ((v + d) % Cam.YAW_WRAP() : U32)
+    case False{}:
+      ((v + Cam.YAW_WRAP() - d) % Cam.YAW_WRAP() : U32)
+
 def Cam.yaw_step(+v: U32, +dn: U32, up: Bool) -> U32:
-  (Cam.step.raw(up, v, dn) % Cam.YAW_WRAP() : U32)
+  Cam.yaw_step.go(up, (v % Cam.YAW_WRAP() : U32),
+    (dn % Cam.YAW_WRAP() : U32))
 
 def Cam.dist_clamp.go(lo: Bool, hi: Bool, v: U32) -> U32:
   match lo hi:

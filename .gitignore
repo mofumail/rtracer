@@ -4,3 +4,17 @@ bench
 bench.gpu
 *.c
 *.js
+
+# IDE
+.idea/
+
+# Build output
+/bz
+
+# Python
+__pycache__/
+
+# Files made by the tools
+*.bz
+*.bzi
+*.pam
