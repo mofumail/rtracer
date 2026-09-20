@@ -219,6 +219,17 @@ def Phys.reach(bs: S.Blobs, +ctr: V.V3, +best: F32) -> F32:
             F32.max(best, (V.V3.len(V.V3.sub(pos, ctr)) + rad : F32)))
 
 # An empty cloud gets a zero radius, so the bound test rejects immediately.
+# The same bound, but with the balls left as a flat list instead of a tree.
+#
+# This is for one-off queries outside the render loop -- the shift-click
+# spawner casts a single ray. It exists so that `Bvh.build` is not reachable
+# from the app's tick at all: a cold caller of a big recursive routine
+# de-optimises the hot path it shares code with, which cost 21 ms a frame
+# against 79 ms when the spawner built a tree. See NOTES-BEND.md.
+def Phys.flat(+bs: S.Blobs) -> S.Cloud:
+  +c = Phys.centre.go(bs, V.V3{0.0, 0.0, 0.0}, 0.0)
+  S.Cloud{c, Phys.reach(bs, c, 0.0), S.BItems{bs}}
+
 def Phys.cloud(+bs: S.Blobs) -> S.Cloud:
   +c = Phys.centre.go(bs, V.V3{0.0, 0.0, 0.0}, 0.0)
-  S.Cloud{c, Phys.reach(bs, c, 0.0), bs}
+  S.Cloud{c, Phys.reach(bs, c, 0.0), S.Bvh.of(bs)}

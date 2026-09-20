@@ -267,38 +267,6 @@ def Render.tile(+d: Nat, +step: U32, +x: U32, +y: U32, +bs: Basis,
         Render.tile(p, h, (x + h : U32), (y + h : U32), bs, balls)
       Qua{tl, tr, bl, br}
 
-# How many levels of the split hand each child its own copy of the ball
-# cloud. 6 gives 4096 independent subtrees, which is enough that no reference
-# count is hot enough to serialise the cores.
-def Render.SPLIT_K() -> Nat:
-  6n
-
-# The top `SPLIT_K` levels of the split copy the cloud for every child; below
-# that a subtree shares one copy, which is fine because the sharing is then
-# local to the subtree instead of global to the frame.
-#
-# This exists purely for speed: `Render.split` and `Render.tile` build the
-# same tree, and `Cloud.copy` returns an equal cloud. Without it, every ray in
-# the frame incremented the same reference count, and the renderer got slower
-# as threads were added.
-def Render.split(+k: Nat, +d: Nat, +step: U32, +x: U32, +y: U32, +bs: Basis,
-  +balls: S.Cloud) -> Image:
-  match k:
-    case 0n:
-      Render.tile(d, step, x, y, bs, balls)
-    case 1n+j:
-      match d:
-        case 0n:
-          Pix{Render.pixel(bs, balls, x, y)}
-        case 1n+p:
-          +h = U32.shr(step)
-          tl tr bl br = Render.split(j, p, h, x, y, bs, S.Cloud.copy(balls))
-            Render.split(j, p, h, (x + h : U32), y, bs, S.Cloud.copy(balls))
-            Render.split(j, p, h, x, (y + h : U32), bs, S.Cloud.copy(balls))
-            Render.split(j, p, h, (x + h : U32), (y + h : U32), bs,
-              S.Cloud.copy(balls))
-          Qua{tl, tr, bl, br}
-
 def Render.size(+d: Nat) -> U32:
   U32.shln(1, d)
 
@@ -311,7 +279,7 @@ def Render.size(+d: Nat) -> U32:
 # with the GPU enabled is worse than either, because the corpus then lives in
 # managed memory and every CPU thread pays for it.
 def Render.at(+d: Nat, c: Cam, +balls: S.Cloud) -> Image:
-  Render.split!(Render.SPLIT_K(), d, Render.size(d), 0, 0,
+  Render.tile!(d, Render.size(d), 0, 0,
     Basis.of(c, U32.to_f32(Render.WIDTH()), U32.to_f32(Render.HEIGHT())),
     balls)
 

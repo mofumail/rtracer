@@ -47,32 +47,25 @@ type Blobs is Data:
   BNil{}
   BCons{head: Ball, tail: Blobs}
 
+# A bounding volume hierarchy over the dropped balls, rebuilt once a frame.
+#
+# Each `BPair` stores its two children's bounding spheres inline, so a ray can
+# reject a whole subtree without opening it -- opening it to read its bound
+# would mean using the child twice, and a `+` on a node is a reference count
+# on the hot path. A ray that would have tested 1000 balls tests about 20
+# nodes instead.
+type Bvh is Data:
+  BEmpty{}
+  BItems{items: Blobs}
+  BPair{lc: V.V3, lr: F32, l: Bvh, rc: V.V3, rr: F32, r: Bvh}
+
 # The balls plus a sphere enclosing all of them. Every ray tests the bound
 # once and skips the whole list when it misses, which is most rays: the sky,
 # the distant floor, and shadow rays pointing up and away. Without it each
 # ball costs an intersection on every bounce and every shadow ray of every
 # pixel, which measured ~23 ms per ball at 1920x1080.
 type Cloud is Data:
-  Cloud{ctr: V.V3, rad: F32, items: Blobs}
-
-# Rebuilds the spine, so the result shares no heap cell with its argument.
-#
-# Bend reference-counts every `+` value. A ball list shared by a whole frame
-# means one atomic counter that every core increments on every ray, and that
-# single contended cache line is enough to make 21 threads slower than 1.
-# Handing each parallel subtree its own copy is what lets the traversal scale;
-# see NOTES-BEND.md for the measurement.
-def Blobs.copy(bs: Blobs) -> Blobs:
-  match bs:
-    case BNil{}:
-      BNil{}
-    case BCons{b, tl}:
-      BCons{b, Blobs.copy(tl)}
-
-def Cloud.copy(c: Cloud) -> Cloud:
-  match c:
-    case Cloud{ctr, rad, items}:
-      Cloud{ctr, rad, Blobs.copy(items)}
+  Cloud{ctr: V.V3, rad: F32, root: Bvh}
 
 def Scene.EPS() -> F32:
   0.001
@@ -139,6 +132,137 @@ def Scene.sky(rd: V.V3) -> V.V3:
     case V.V3{x, y, z}:
       +t = F32.clamp((0.5 * y + 0.5 : F32), 0.0, 1.0)
       V.V3.lerp(V.V3{0.62, 0.70, 0.82}, V.V3{0.16, 0.32, 0.62}, t)
+
+# -- Building the hierarchy ---------------------------------------------------
+#
+# Rebuilt from scratch every frame. That sounds wasteful next to 4.19M pixels,
+# but it is O(n log n) on a list of hundreds, against O(n) work per ray for
+# millions of rays -- the build does not show up in a frame time at all.
+#
+# The split is a k-d style one: rotate through x, y, z by depth and cut at the
+# centroid on that axis. No sorting, no extent scan, and the centroid is
+# already needed for the bounding sphere.
+
+def Ball.pos(b: Ball) -> V.V3:
+  match b:
+    case Ball{id, pos, vel, rad, alb, refl}:
+      pos
+
+def Ball.rad(b: Ball) -> F32:
+  match b:
+    case Ball{id, pos, vel, rad, alb, refl}:
+      rad
+
+def V3.axis.go(isx: Bool, isy: Bool, x: F32, y: F32, z: F32) -> F32:
+  match isx isy:
+    case True{} True{}:
+      x
+    case True{} False{}:
+      x
+    case False{} True{}:
+      y
+    case False{} False{}:
+      z
+
+def V3.axis(v: V.V3, +a: U32) -> F32:
+  match v:
+    case V.V3{x, y, z}:
+      V3.axis.go(U32.is_eq(a, 0), U32.is_eq(a, 1), x, y, z)
+
+def Blobs.count(bs: Blobs, acc: F32) -> F32:
+  match bs:
+    case BNil{}:
+      acc
+    case BCons{b, tl}:
+      Blobs.count(tl, (acc + 1.0 : F32))
+
+def Blobs.sum(bs: Blobs, acc: V.V3) -> V.V3:
+  match bs:
+    case BNil{}:
+      acc
+    case BCons{b, tl}:
+      Blobs.sum(tl, V.V3.add(acc, Ball.pos(b)))
+
+def Blobs.reach(bs: Blobs, +c: V.V3, acc: F32) -> F32:
+  match bs:
+    case BNil{}:
+      acc
+    case BCons{+b, tl}:
+      Blobs.reach(tl, c, F32.max(acc,
+        (V.V3.len(V.V3.sub(Ball.pos(b), c)) + Ball.rad(b) : F32)))
+
+def Blobs.centre.go(none: Bool, s: V.V3, +n: F32) -> V.V3:
+  match none:
+    case True{}:
+      V.V3{0.0, 0.0, 0.0}
+    case False{}:
+      V.V3.scale(s, (1.0 / n : F32))
+
+def Blobs.centre(+bs: Blobs) -> V.V3:
+  +n = Blobs.count(bs, 0.0)
+  Blobs.centre.go(F32.is_lt(n, 0.5), Blobs.sum(bs, V.V3{0.0, 0.0, 0.0}), n)
+
+# True once a list is small enough to scan linearly instead of splitting.
+def Blobs.small(+bs: Blobs) -> Bool:
+  F32.is_lt(Blobs.count(bs, 0.0), 2.5)
+
+# Two filter passes rather than one partition returning a pair: Bend cannot
+# destructure a computed value, and a helper that split and then called the
+# builder back would be mutual recursion. The extra walk is nothing here.
+def Blobs.keep(keep: Bool, b: Ball, rest: Blobs) -> Blobs:
+  match keep:
+    case True{}:
+      BCons{b, rest}
+    case False{}:
+      rest
+
+def Blobs.below(bs: Blobs, +a: U32, +mid: F32) -> Blobs:
+  match bs:
+    case BNil{}:
+      BNil{}
+    case BCons{+b, tl}:
+      Blobs.keep(F32.is_lt(V3.axis(Ball.pos(b), a), mid), b,
+        Blobs.below(tl, a, mid))
+
+def Blobs.above(bs: Blobs, +a: U32, +mid: F32) -> Blobs:
+  match bs:
+    case BNil{}:
+      BNil{}
+    case BCons{+b, tl}:
+      Blobs.keep(Bool.not(F32.is_lt(V3.axis(Ball.pos(b), a), mid)), b,
+        Blobs.above(tl, a, mid))
+
+# How deep the tree may go. The fuel is also what makes the recursion
+# terminate when a split degenerates -- every ball at the same point puts them
+# all on one side, and nothing shrinks.
+def Bvh.FUEL() -> Nat:
+  16n
+
+# `small` is computed by the caller: Bend forbids mutual recursion, so a
+# helper that decided and then called back here is not available. `a` is the
+# split axis, rotating x -> y -> z with depth.
+def Bvh.build(fuel: Nat, small: Bool, +a: U32, +bs: Blobs) -> Bvh:
+  match fuel:
+    case 0n:
+      BItems{bs}
+    case 1n+f:
+      match small:
+        case True{}:
+          BItems{bs}
+        case False{}:
+          +f = f
+          +mid = V3.axis(Blobs.centre(bs), a)
+          +lo = Blobs.below(bs, a, mid)
+          +hi = Blobs.above(bs, a, mid)
+          +a2 = ((a + 1 : U32) % 3 : U32)
+          +lc = Blobs.centre(lo)
+          +hc = Blobs.centre(hi)
+          BPair{lc, Blobs.reach(lo, lc, 0.0),
+            Bvh.build(f, Blobs.small(lo), a2, lo), hc,
+            Blobs.reach(hi, hc, 0.0), Bvh.build(f, Blobs.small(hi), a2, hi)}
+
+def Bvh.of(+bs: Blobs) -> Bvh:
+  Bvh.build(Bvh.FUEL(), Blobs.small(bs), 0, bs)
 
 # -- Nearest-hit traversal ----------------------------------------------------
 
@@ -247,28 +371,36 @@ def Sph.blocks(ro: V.V3, rd: V.V3, ctr: V.V3, +rad: F32) -> Bool:
   +disc = (b * b - c : F32)
   Sph.blocks.go(F32.is_lt(disc, 0.0), disc, b)
 
-def Cloud.find.go(near: Bool, items: Blobs, ro: V.V3, rd: V.V3) -> Cand:
-  match near:
-    case False{}:
-      Void{}
-    case True{}:
-      Balls.find(items, Void{}, ro, rd)
-
-# `items` is handed straight to the helper, never matched here.
+# Walks the hierarchy, carrying the best hit so far as an accumulator.
 #
-# An earlier version matched it to short-circuit on an empty cloud and then
-# passed `BCons{h, t}` along. That reads as free, but a match frees the node
-# it opens, so rebuilding it allocated a fresh 13-word cell and re-sealed
-# every field -- once per ray, on every ray, as soon as the scene held a
-# single ball. An empty cloud has radius 0, so the bound test misses and
-# costs a few flops instead.
+# `near` says whether the ray met this node's bounding sphere; the parent
+# computes it from the child's bound, which it stores inline. That is what
+# lets a subtree be rejected without being opened -- opening it to read its
+# own bound would need the node twice, and `+` on a node is a reference count
+# paid by every ray.
+def Bvh.find(t: Bvh, near: Bool, best: Cand, +ro: V.V3, +rd: V.V3) -> Cand:
+  match t:
+    case BEmpty{}:
+      best
+    case BItems{items}:
+      match near:
+        case False{}:
+          best
+        case True{}:
+          Balls.find(items, best, ro, rd)
+    case BPair{lc, lr, l, rc, rr, r}:
+      match near:
+        case False{}:
+          best
+        case True{}:
+          Bvh.find(r, Sph.blocks(ro, rd, rc, rr),
+            Bvh.find(l, Sph.blocks(ro, rd, lc, lr), best, ro, rd), ro, rd)
+
 def Cloud.find(c: Cloud, +ro: V.V3, +rd: V.V3) -> Cand:
   match c:
-    case Cloud{ctr, rad, items}:
-      Cloud.find.go(Sph.blocks(ro, rd, ctr, rad), items, ro, rd)
+    case Cloud{ctr, rad, root}:
+      Bvh.find(root, Sph.blocks(ro, rd, ctr, rad), Void{}, ro, rd)
 
-# One mirror, one glossy metal, three diffuse, on a faintly reflective floor,
-# plus whatever the user has dropped in.
 def Scene.find(+balls: Cloud, +ro: V.V3, +rd: V.V3) -> Cand:
   h0 = Plane.cand(ro, rd, V.V3{0.46, 0.46, 0.50}, 0.16)
   h1 = Sph.cand(ro, rd, Scene.c1(), Scene.r1(), V.V3{0.95, 0.96, 0.98}, 0.88)
@@ -320,19 +452,42 @@ def Balls.shadowed(bs: Blobs, hit: Bool, +ro: V.V3, +rd: V.V3) -> Bool:
     case BCons{b, tl} False{}:
       Balls.shadowed(tl, Ball.blocks(b, ro, rd), ro, rd)
 
-def Cloud.shadowed.go(near: Bool, items: Blobs, ro: V.V3, rd: V.V3) -> Bool:
-  match near:
-    case False{}:
-      False{}
-    case True{}:
-      Balls.shadowed(items, False{}, ro, rd)
+# The occlusion walk carries `done`, the answer so far, and hands the left
+# subtree's result to the right one as its starting value. A right subtree
+# whose `done` is already True returns immediately without being opened, so
+# the walk still stops at the first blocker even though Bend is strict.
+def Bvh.shadowed(t: Bvh, near: Bool, done: Bool, +ro: V.V3, +rd: V.V3) ->
+  Bool:
+  match t:
+    case BEmpty{}:
+      done
+    case BItems{items}:
+      match near done:
+        case True{} False{}:
+          Balls.shadowed(items, False{}, ro, rd)
+        case True{} True{}:
+          True{}
+        case False{} True{}:
+          True{}
+        case False{} False{}:
+          False{}
+    case BPair{lc, lr, l, rc, rr, r}:
+      match near done:
+        case True{} False{}:
+          Bvh.shadowed(r, Sph.blocks(ro, rd, rc, rr),
+            Bvh.shadowed(l, Sph.blocks(ro, rd, lc, lr), False{}, ro, rd), ro,
+            rd)
+        case True{} True{}:
+          True{}
+        case False{} True{}:
+          True{}
+        case False{} False{}:
+          False{}
 
-# Same shape as `Cloud.find`: the list is passed through untouched, because
-# matching it here and rebuilding it cost a heap allocation per ray.
 def Cloud.shadowed(c: Cloud, +ro: V.V3, +rd: V.V3) -> Bool:
   match c:
-    case Cloud{ctr, rad, items}:
-      Cloud.shadowed.go(Sph.blocks(ro, rd, ctr, rad), items, ro, rd)
+    case Cloud{ctr, rad, root}:
+      Bvh.shadowed(root, Sph.blocks(ro, rd, ctr, rad), False{}, ro, rd)
 
 def Scene.shadowed(+balls: Cloud, +ro: V.V3, +rd: V.V3) -> Bool:
   Bool.or(Cloud.shadowed(balls, ro, rd),

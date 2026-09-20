@@ -126,7 +126,7 @@ def Spawn.where(cam: R.Cam, balls: S.Blobs, x: U32, y: U32) -> V.V3:
   +bs = R.Render.basis(cam)
   +ro = R.Basis.eye(bs)
   +rd = R.Render.ray(bs, x, y)
-  Spawn.point(S.Scene.find.cold(P.Phys.cloud(balls), ro, rd), ro, rd)
+  Spawn.point(S.Scene.find.cold(P.Phys.flat(balls), ro, rd), ro, rd)
 
 # Random radius, colour and a little random gloss.
 def Spawn.ball(+seed: U32, at: V.V3) -> S.Ball:
