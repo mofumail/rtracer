@@ -55,6 +55,25 @@ type Blobs is Data:
 type Cloud is Data:
   Cloud{ctr: V.V3, rad: F32, items: Blobs}
 
+# Rebuilds the spine, so the result shares no heap cell with its argument.
+#
+# Bend reference-counts every `+` value. A ball list shared by a whole frame
+# means one atomic counter that every core increments on every ray, and that
+# single contended cache line is enough to make 21 threads slower than 1.
+# Handing each parallel subtree its own copy is what lets the traversal scale;
+# see NOTES-BEND.md for the measurement.
+def Blobs.copy(bs: Blobs) -> Blobs:
+  match bs:
+    case BNil{}:
+      BNil{}
+    case BCons{b, tl}:
+      BCons{b, Blobs.copy(tl)}
+
+def Cloud.copy(c: Cloud) -> Cloud:
+  match c:
+    case Cloud{ctr, rad, items}:
+      Cloud{ctr, rad, Blobs.copy(items)}
+
 def Scene.EPS() -> F32:
   0.001
 
@@ -196,17 +215,24 @@ def Ball.cand(b: Ball, ro: V.V3, rd: V.V3) -> Cand:
     case Ball{id, pos, vel, rad, alb, refl}:
       Sph.cand(ro, rd, pos, rad, alb, refl)
 
-# Every ray walks the whole list, so the cost is the same for all of them and
-# the split stays balanced -- the thing Bend's scheduler cares about.
-def Balls.find(bs: Blobs, +ro: V.V3, +rd: V.V3) -> Cand:
+# The running best is an accumulator so the recursive call sits in tail
+# position, which Bend compiles to a loop. The old shape wrapped the call in
+# `Cand.closer`, which is not a tail call: it built one continuation per ball
+# per ray, and overflowed the machine stack somewhere past 128 balls.
+def Balls.find(bs: Blobs, best: Cand, +ro: V.V3, +rd: V.V3) -> Cand:
   match bs:
     case BNil{}:
-      Void{}
+      best
     case BCons{b, tl}:
-      Cand.closer(Ball.cand(b, ro, rd), Balls.find(tl, ro, rd))
+      Balls.find(tl, Cand.closer(Ball.cand(b, ro, rd), best), ro, rd)
 
 # A shadow ray only needs a yes or no, so nothing here builds a record or
 # normalizes a vector. The light is directional, so any root past EPS blocks.
+#
+# The walk carries the answer so far as a parameter: Bend is strict, so
+# `Bool.or(test, recurse)` evaluated the whole list even after something
+# blocked. Carrying it lets the walk stop at the first blocker, and puts the
+# recursive call in tail position.
 def Sph.blocks.go(miss: Bool, +disc: F32, +b: F32) -> Bool:
   match miss:
     case True{}:
@@ -226,23 +252,41 @@ def Cloud.find.go(near: Bool, items: Blobs, ro: V.V3, rd: V.V3) -> Cand:
     case False{}:
       Void{}
     case True{}:
-      Balls.find(items, ro, rd)
+      Balls.find(items, Void{}, ro, rd)
 
-# An empty cloud short-circuits on a constructor match rather than paying for
-# the bound intersection, so a scene with no dropped balls costs exactly what
-# it did before the feature existed.
+# `items` is handed straight to the helper, never matched here.
+#
+# An earlier version matched it to short-circuit on an empty cloud and then
+# passed `BCons{h, t}` along. That reads as free, but a match frees the node
+# it opens, so rebuilding it allocated a fresh 13-word cell and re-sealed
+# every field -- once per ray, on every ray, as soon as the scene held a
+# single ball. An empty cloud has radius 0, so the bound test misses and
+# costs a few flops instead.
 def Cloud.find(c: Cloud, +ro: V.V3, +rd: V.V3) -> Cand:
   match c:
     case Cloud{ctr, rad, items}:
-      match items:
-        case BNil{}:
-          Void{}
-        case BCons{h, t}:
-          Cloud.find.go(Sph.blocks(ro, rd, ctr, rad), BCons{h, t}, ro, rd)
+      Cloud.find.go(Sph.blocks(ro, rd, ctr, rad), items, ro, rd)
 
 # One mirror, one glossy metal, three diffuse, on a faintly reflective floor,
 # plus whatever the user has dropped in.
 def Scene.find(+balls: Cloud, +ro: V.V3, +rd: V.V3) -> Cand:
+  h0 = Plane.cand(ro, rd, V.V3{0.46, 0.46, 0.50}, 0.16)
+  h1 = Sph.cand(ro, rd, Scene.c1(), Scene.r1(), V.V3{0.95, 0.96, 0.98}, 0.88)
+  h2 = Sph.cand(ro, rd, Scene.c2(), Scene.r2(), V.V3{0.88, 0.22, 0.18}, 0.0)
+  h3 = Sph.cand(ro, rd, Scene.c3(), Scene.r3(), V.V3{0.22, 0.40, 0.90}, 0.05)
+  h4 = Sph.cand(ro, rd, Scene.c4(), Scene.r4(), V.V3{0.96, 0.74, 0.28}, 0.5)
+  h5 = Sph.cand(ro, rd, Scene.c5(), Scene.r5(), V.V3{0.28, 0.74, 0.34}, 0.0)
+  Cand.closer(Cand.closer(Cand.closer(h0, h1), Cloud.find(balls, ro, rd)),
+    Cand.closer(Cand.closer(h2, h3), Cand.closer(h4, h5)))
+
+# A second copy of `Scene.find`, for callers outside the render loop.
+#
+# `Scene.find` is inlined into the per-pixel path. Adding a single cold call
+# site -- the shift-click spawner, which runs once per click -- was enough to
+# make the compiler outline it instead, and every ray in every frame then paid
+# for the call. Measured at 1080p with 8 balls: 62 ms a frame with this copy,
+# 120 ms without it. Keep the two bodies identical; see NOTES-BEND.md.
+def Scene.find.cold(+balls: Cloud, +ro: V.V3, +rd: V.V3) -> Cand:
   h0 = Plane.cand(ro, rd, V.V3{0.46, 0.46, 0.50}, 0.16)
   h1 = Sph.cand(ro, rd, Scene.c1(), Scene.r1(), V.V3{0.95, 0.96, 0.98}, 0.88)
   h2 = Sph.cand(ro, rd, Scene.c2(), Scene.r2(), V.V3{0.88, 0.22, 0.18}, 0.0)
@@ -265,28 +309,30 @@ def Ball.blocks(b: Ball, ro: V.V3, rd: V.V3) -> Bool:
     case Ball{id, pos, vel, rad, alb, refl}:
       Sph.blocks(ro, rd, pos, rad)
 
-def Balls.shadowed(bs: Blobs, +ro: V.V3, +rd: V.V3) -> Bool:
-  match bs:
-    case BNil{}:
+def Balls.shadowed(bs: Blobs, hit: Bool, +ro: V.V3, +rd: V.V3) -> Bool:
+  match bs hit:
+    case BNil{} True{}:
+      True{}
+    case BNil{} False{}:
       False{}
-    case BCons{b, tl}:
-      Bool.or(Ball.blocks(b, ro, rd), Balls.shadowed(tl, ro, rd))
+    case BCons{b, tl} True{}:
+      True{}
+    case BCons{b, tl} False{}:
+      Balls.shadowed(tl, Ball.blocks(b, ro, rd), ro, rd)
 
 def Cloud.shadowed.go(near: Bool, items: Blobs, ro: V.V3, rd: V.V3) -> Bool:
   match near:
     case False{}:
       False{}
     case True{}:
-      Balls.shadowed(items, ro, rd)
+      Balls.shadowed(items, False{}, ro, rd)
 
+# Same shape as `Cloud.find`: the list is passed through untouched, because
+# matching it here and rebuilding it cost a heap allocation per ray.
 def Cloud.shadowed(c: Cloud, +ro: V.V3, +rd: V.V3) -> Bool:
   match c:
     case Cloud{ctr, rad, items}:
-      match items:
-        case BNil{}:
-          False{}
-        case BCons{h, t}:
-          Cloud.shadowed.go(Sph.blocks(ro, rd, ctr, rad), BCons{h, t}, ro, rd)
+      Cloud.shadowed.go(Sph.blocks(ro, rd, ctr, rad), items, ro, rd)
 
 def Scene.shadowed(+balls: Cloud, +ro: V.V3, +rd: V.V3) -> Bool:
   Bool.or(Cloud.shadowed(balls, ro, rd),

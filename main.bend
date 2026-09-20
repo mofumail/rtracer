@@ -118,11 +118,15 @@ def Spawn.point(c: S.Cand, +ro: V.V3, +rd: V.V3) -> V.V3:
 
 # Aims at the pixel under the cursor, finds what is there, and drops the new
 # ball from a little way above it.
+#
+# It calls `Scene.find.cold`, not `Scene.find`. They have the same body, but
+# pointing this one cold call site at the renderer's copy stopped the compiler
+# inlining it per pixel and doubled every frame's cost.
 def Spawn.where(cam: R.Cam, balls: S.Blobs, x: U32, y: U32) -> V.V3:
   +bs = R.Render.basis(cam)
   +ro = R.Basis.eye(bs)
   +rd = R.Render.ray(bs, x, y)
-  Spawn.point(S.Scene.find(P.Phys.cloud(balls), ro, rd), ro, rd)
+  Spawn.point(S.Scene.find.cold(P.Phys.cloud(balls), ro, rd), ro, rd)
 
 # Random radius, colour and a little random gloss.
 def Spawn.ball(+seed: U32, at: V.V3) -> S.Ball:
@@ -140,8 +144,7 @@ def Spawn.ball(+seed: U32, at: V.V3) -> S.Ball:
 # recognise itself when colliding against the list.
 def Spawn.add(s: St, x: U32, y: U32) -> St:
   match s:
-    case St{cam, ptr, +balls, +seed, live}:
-      +cam = cam
+    case St{+cam, ptr, +balls, +seed, live}:
       St{cam, ptr,
         S.BCons{Spawn.ball(seed, Spawn.where(cam, balls, x, y)),
           P.Phys.take(P.Phys.MAX(), balls)},

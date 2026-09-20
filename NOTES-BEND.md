@@ -259,35 +259,117 @@ event loop is running. Worth a look from someone who knows the scheduler.
 
 ---
 
-### 12. Unexplained: threading one more parameter through the tracer costs 2.5x
+### 12. SOLVED: one cold call site stops a hot function being inlined
 
-Adding a scene parameter (the user-dropped balls) to the hot path took the
-frame from 22 ms to ~52 ms at 1920x1080 — **with an empty list**, so no extra
-intersection work is being done. The parameter is added to `Trace`,
-`Trace.depth`, `Trace.leaf`, `Scene.find`, `Scene.shadowed` and `Shade.local`.
+*(This was filed as "threading one more parameter through the tracer costs
+2.5x, cause unknown". The cause is now known and it was not the parameter.)*
 
-Ruled out, each by measurement:
+`Scene.find` is the per-pixel intersection routine: it runs about eight times
+per pixel, four million pixels a frame. The shift-click spawner also needs to
+know what is under the cursor, so it called `Scene.find` too — once per click.
 
-* **Not the data.** An empty cloud costs the same as fourteen balls once the
-  bounding volume is in (52 ms vs 53 ms).
-* **Not threading it down the quadtree.** Passing a literal empty list at
-  every leaf instead of carrying the parameter: still 50 ms.
-* **Not Base's polymorphic `List`.** Replacing `List<&2, Ball>` with a
-  monomorphic `Blobs` type changed nothing.
-* **Not record duplication.** `Render.pixel` was briefly taking `+bs: Basis`
-  and using it twice; fixing that to destructure once changed nothing.
-* **Not the bound test.** Short-circuiting an empty cloud on a constructor
-  match, before any intersection, changed nothing.
+That single cold call site cost **a factor of 2.5 on every frame**:
 
-What *did* move it: deleting the call entirely. Replacing
-`Cloud.shadowed(balls, ro, rd)` with `False{}` recovered 15 ms of the 30.
+| | frame time, 1080p, no balls |
+|---|---|
+| spawner calls `Scene.find` | 53 ms (19 fps) |
+| spawner calls its own copy | 21 ms (48 fps) |
 
-That pattern — the cost tracks whether the call is *present*, not what it
-does — points at a compilation effect rather than arithmetic, which would fit
-the inlining threshold hinted at in `comp.ts` ("a native with this many lines
-or more is a call on both lanes ... at 128 raytrace lost 31% on PAR-CPU").
-If that is what this is, a way to see or control it would help a lot: right
-now adding one argument to a hot function can cost 2.5x with no diagnostic.
+Two call sites instead of one appear to push the function past the inlining
+threshold in `comp.ts`, so the hot path stops being inlined and every ray pays
+for a call. The fix is a duplicate definition, `Scene.find.cold`, with an
+identical body, used only by the spawner.
+
+This is worth a language-level answer, because the failure mode is nasty:
+adding a *cold* caller silently halves the speed of an unrelated hot loop,
+with no diagnostic and no obvious connection between cause and effect. An
+`@inline` attribute, or a warning when a hot function crosses the threshold,
+would both work.
+
+---
+
+### 13. Reference counting a shared list makes threads fight
+
+The ball list was one `+` value read by every ray in the frame. `+` means
+reference counted, and the counter is one word: every core does an atomic
+increment on the same cache line, millions of times a frame.
+
+The result is not just lost speedup but *negative* speedup — at 512x512 with
+8 balls:
+
+| threads | before | after |
+|---|---|---|
+| 1 | 88 ms | 88 ms |
+| 4 | 66 ms | 27 ms |
+| 21 | **92 ms** | 10 ms |
+
+Twenty-one cores were slower than one. An empty list hides it completely,
+because `BNil` is stored inline and never reference counted — which is why
+the scene was fast until the first ball was dropped.
+
+The fix is `Render.split`: for the top 6 levels of the quadtree, each child
+gets its own `Cloud.copy` of the list. 4096 independent counters instead of
+one, and the copy costs nothing next to what it saves.
+
+Nothing in the language surfaces this. `+` reads as "I may use this twice",
+not "this becomes a contended atomic in a parallel loop".
+
+---
+
+### 14. A match frees the node it opens, so rebuilding it allocates
+
+This was written to let an empty cloud short-circuit before the bound test:
+
+```python
+match items:
+  case BNil{}:
+    Void{}
+  case BCons{h, t}:
+    Cloud.find.go(Sph.blocks(ro, rd, ctr, rad), BCons{h, t}, ro, rd)
+```
+
+`BCons{h, t}` looks like it hands the list straight back. It does not. The
+match frees the cell, so the constructor allocates a fresh 13-word node and
+re-seals all 13 fields — per ray, on every ray, as soon as the scene held one
+ball. The emitted C makes it obvious once you look:
+
+```c
+u64 sp_0 = ctr_take(e, c_4, 13, fb_0);       // destructure
+u64 nd_0 = ... heap_alloc(e, cls_fit(13));   // allocate a new one
+e.mem[nd_0 + 0] = rfc_seal(e, f_0);          // ... x13
+```
+
+Passing `items` through untouched took 2K with 8 balls from 214 ms to 87 ms.
+The guide does say a match frees the node it opens; what is easy to miss is
+that re-applying the same constructor to the same fields is an allocation
+rather than a no-op.
+
+---
+
+### 15. Bend is strict, so `Bool.or` does not short-circuit at the call site
+
+`Bool.or(a, b)` branches on `a` in its body, but both arguments are evaluated
+before the call. So
+
+```python
+Bool.or(Ball.blocks(b, ro, rd), Balls.shadowed(tl, ro, rd))
+```
+
+walks the entire ball list on every shadow ray even after something has
+already blocked the light. Carrying the answer so far as a parameter and
+matching on it stops the walk at the first blocker — and puts the recursive
+call in tail position, which matters for the next note.
+
+---
+
+### 16. A non-tail recursive walk overflows the machine stack
+
+`Cand.closer(Ball.cand(b, ro, rd), Balls.find(tl, ro, rd))` is not a tail
+call: the result feeds a constructor. Bend compiles tail calls to loops, but
+this built one continuation per ball per ray, and past about 128 balls the
+process died with `memory fault (machine stack overflow?)` — a crash, not a
+slowdown. Rewriting it with an accumulator (`best`) fixed both the crash and
+the allocation traffic.
 
 ---
 

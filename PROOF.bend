@@ -94,8 +94,53 @@ def tile_pixels(d, step, x, y, bs, balls):
         tile_pixels(p, h, x, (y + h : U32), bs, balls),
         tile_pixels(p, h, (x + h : U32), (y + h : U32), bs, balls))
 
+# `Render.at` goes through `Render.split`, which copies the cloud for each
+# child over the top `SPLIT_K` levels and then hands off to `Render.tile`.
+# The copying is invisible to the count, so the same induction works with one
+# extra layer: induct on `k` down to the handoff, where `tile_pixels` closes
+# it, and on `d` inside each copying level.
+law split_pixels:
+  for +k: Nat
+  for +d: Nat
+  for +step: U32
+  for +x: U32
+  for +y: U32
+  for +bs: R.Basis
+  for +balls: S.Cloud
+  {R.Img.count(d, R.Render.split(k, d, step, x, y, bs, balls)) ==
+    Nat.pow(4n, d) : Nat}
+
+def split_pixels(k, d, step, x, y, bs, balls):
+  match k:
+    case 0n:
+      tile_pixels(d, step, x, y, bs, balls)
+    case 1n+j:
+      match d:
+        case 0n:
+          {==}
+        case 1n+p:
+          +h = U32.shr(step)
+          add4(
+            R.Img.count(p,
+              R.Render.split(j, p, h, x, y, bs, S.Cloud.copy(balls))),
+            R.Img.count(p,
+              R.Render.split(j, p, h, (x + h : U32), y, bs,
+                S.Cloud.copy(balls))),
+            R.Img.count(p,
+              R.Render.split(j, p, h, x, (y + h : U32), bs,
+                S.Cloud.copy(balls))),
+            R.Img.count(p,
+              R.Render.split(j, p, h, (x + h : U32), (y + h : U32), bs,
+                S.Cloud.copy(balls))),
+            Nat.pow(4n, p),
+            split_pixels(j, p, h, x, y, bs, S.Cloud.copy(balls)),
+            split_pixels(j, p, h, (x + h : U32), y, bs, S.Cloud.copy(balls)),
+            split_pixels(j, p, h, x, (y + h : U32), bs, S.Cloud.copy(balls)),
+            split_pixels(j, p, h, (x + h : U32), (y + h : U32), bs,
+              S.Cloud.copy(balls)))
+
 def Laws.frame_pixels(d, c, balls):
-  tile_pixels(d, R.Render.size(d), 0, 0,
+  split_pixels(R.Render.SPLIT_K(), d, R.Render.size(d), 0, 0,
     R.Basis.of(c, U32.to_f32(R.Render.WIDTH()),
       U32.to_f32(R.Render.HEIGHT())), balls)
 

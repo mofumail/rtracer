@@ -64,32 +64,58 @@ renderer stays pure and a given sequence of clicks is reproducible.
 
 ### What this costs
 
-Adding objects to a brute-force tracer is expensive: every ball is another
-intersection on every bounce *and* every shadow ray, of every one of 4.19M
-pixels. Measured at 1920x1080 before any acceleration:
+Adding objects to a brute-force tracer is inherently expensive: every ball is
+another intersection on every bounce *and* every shadow ray, of every one of
+4.19M pixels. But most of what this feature originally cost was not that. It
+was four separate mistakes in how the ball list was handled, each worth
+measuring on its own; `NOTES-BEND.md` §12-16 has the details.
 
-| balls | ms/frame | fps |
+Measured at 1920x1080 on the GPU, in the window, with the balls spread across
+the visible floor:
+
+| balls | before | after |
 | ---: | ---: | ---: |
-| 0 | 50 | 20 |
-| 5 | 121 | 8 |
-| 14 | 366 | 2.7 |
+| 0 | 53 ms (19 fps) | **21 ms (48 fps)** |
+| 8 | 337 ms (3.0 fps) | **61 ms (16 fps)** |
+| 32 | 1679 ms (0.6 fps) | **128 ms (7.8 fps)** |
+| 128 | *crashed* | 576 ms (1.7 fps) |
 
-So the balls are wrapped in a `Cloud`: a sphere enclosing all of them,
-rebuilt once per frame and tested once per ray. A ray that misses the bound
-skips the whole list, which is most rays — the sky, the far floor, and shadow
-rays pointing up and away. That flattens the curve completely:
+The four causes, in order of how much they cost:
 
-| balls | ms/frame | fps |
-| ---: | ---: | ---: |
-| 0 | 52 | 19 |
-| 5 | 53 | 19 |
-| 14 | 53–59 | 17–19 |
+1. **A cold call site stopped a hot function being inlined.** The spawner
+   called `Scene.find` to see what was under the cursor — once per click. That
+   second call site was enough to stop `Scene.find` being inlined into the
+   per-pixel path, and every ray then paid for a call. On its own this was 53
+   ms against 21 ms *with no balls in the scene at all*. The fix is a
+   duplicate definition, `Scene.find.cold`, for callers outside the render
+   loop.
 
-Ball count no longer matters. What remains is a fixed ~30 ms that appears as
-soon as the ball parameter is threaded through the tracer at all — it is there
-with an empty cloud, and it is not the work being done. See `NOTES-BEND.md`
-§12; the honest summary is that the feature costs about 2.5x and I could not
-account for it.
+2. **Every core was fighting over one reference count.** `+` means reference
+   counted, and one shared ball list means one shared counter. At 8 balls, 21
+   threads were *slower than 1* (92 ms against 88 ms). `Render.split` now
+   hands each of the top 4096 subtrees its own copy of the list, so the
+   counters are independent; the same case is now 10 ms on 21 threads.
+
+3. **A match frees the node it opens.** `Cloud.find` matched the list to
+   short-circuit on empty and then passed `BCons{h, t}` along, which allocated
+   a fresh 13-word cell and re-sealed all 13 fields — per ray. Passing the
+   list through untouched took 2K/8 balls from 214 ms to 87 ms.
+
+4. **The traversal was not a tail call, and did not short-circuit.** Bend
+   compiles tail calls to loops, but `Cand.closer(Ball.cand(..), Balls.find(..))`
+   is not one: it built a continuation per ball per ray and overflowed the
+   machine stack past ~128 balls. And because Bend is strict, `Bool.or` did
+   not stop the shadow walk at the first blocker. Both are now accumulator
+   loops.
+
+Ball cost is now close to linear and close to what the arithmetic says it
+should be: on 32 CPU threads a 2K frame is 41.9 ms empty, 53.3 ms with 8
+balls, 87.3 ms with 32.
+
+What is left is algorithmic, not a language problem: the tracer tests every
+ball against every ray, so cost grows linearly with ball count. Thousands of
+balls needs a spatial structure (a BVH over the balls, rebuilt each frame)
+rather than the single bounding sphere used now.
 
 ## The scene
 
@@ -194,9 +220,11 @@ window and walks each one with `Img.sum` so nothing can be skipped:
 
 | frame | 1 thread | 32 threads | GPU |
 | --- | ---: | ---: | ---: |
-| 512×512 | 22 816 | **2 333** | 3 883 |
-| 1024×1024 | 115 050 | **10 750** | 15 400 |
-| 2048×2048 | 459 000 | **37 700** | 51 000 |
+| 512×512 | 26 483 | **2 816** | 4 050 |
+| 1024×1024 | 130 800 | **12 200** | 16 050 |
+| 2048×2048 | 525 700 | **41 900** | 56 500 |
+| 2048×2048, 8 balls | 649 333 | **53 333** | 83 333 |
+| 2048×2048, 32 balls | 957 666 | **87 333** | 119 500 |
 
 (µs/frame. All three backends produce identical checksums, which is a decent
 end-to-end check that the CPU and GPU lanes agree.)
