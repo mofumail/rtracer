@@ -8,13 +8,14 @@
 # backends, not as frame times; README has the end-to-end figures.
 
 import Base
+import ./vec.bend as V
 import ./scene.bend as S
 import ./render.bend as R
 
 # `Img.sum` walks the whole frame, so nothing can be skipped.
 # Benchmarks the fixed scene with no dropped balls.
 def Bench.one(+d: Nat, yaw: U32) -> U32:
-  R.Img.sum(d, R.Render.at(d, R.Cam{yaw, 1005, 780}, S.BNil{}))
+  R.Img.sum(d, R.Render.at(d, R.Cam{yaw, 1005, 780}, S.Cloud{V.V3{0.0, 0.0, 0.0}, 0.0, S.BNil{}}))
 
 def Bench.loop(n: Nat, +d: Nat, +yaw: U32, acc: U32) -> U32:
   match n:

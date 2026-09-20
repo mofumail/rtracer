@@ -187,3 +187,38 @@ def Phys.take(n: Nat, bs: S.Blobs) -> S.Blobs:
           S.BNil{}
         case S.BCons{b, tl}:
           S.BCons{b, Phys.take(p, tl)}
+
+# -- The bounding volume ------------------------------------------------------
+
+# Rebuilt once per frame and handed to the renderer, where every ray tests it
+# before touching the list.
+def Phys.centre.fin(none: Bool, acc: V.V3, +n: F32) -> V.V3:
+  match none:
+    case True{}:
+      V.V3{0.0, 0.0, 0.0}
+    case False{}:
+      V.V3.scale(acc, (1.0 / n : F32))
+
+def Phys.centre.go(bs: S.Blobs, acc: V.V3, +n: F32) -> V.V3:
+  match bs:
+    case S.BNil{}:
+      Phys.centre.fin(F32.is_lt(n, 0.5), acc, n)
+    case S.BCons{b, tl}:
+      match b:
+        case S.Ball{id, pos, vel, rad, alb, refl}:
+          Phys.centre.go(tl, V.V3.add(acc, pos), (n + 1.0 : F32))
+
+def Phys.reach(bs: S.Blobs, +ctr: V.V3, +best: F32) -> F32:
+  match bs:
+    case S.BNil{}:
+      best
+    case S.BCons{b, tl}:
+      match b:
+        case S.Ball{id, pos, vel, rad, alb, refl}:
+          Phys.reach(tl, ctr,
+            F32.max(best, (V.V3.len(V.V3.sub(pos, ctr)) + rad : F32)))
+
+# An empty cloud gets a zero radius, so the bound test rejects immediately.
+def Phys.cloud(+bs: S.Blobs) -> S.Cloud:
+  +c = Phys.centre.go(bs, V.V3{0.0, 0.0, 0.0}, 0.0)
+  S.Cloud{c, Phys.reach(bs, c, 0.0), bs}

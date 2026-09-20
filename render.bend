@@ -238,7 +238,7 @@ def Basis.eye(bs: Basis) -> V.V3:
 # `Basis.eye` and `Render.ray` on it. Those two read well, but using the
 # record twice here duplicates it at every one of the frame's millions of
 # leaves, which measured 51 ms/frame against 22 ms.
-def Render.pixel(bs: Basis, balls: S.Blobs, x: U32, y: U32) -> U32:
+def Render.pixel(bs: Basis, balls: S.Cloud, x: U32, y: U32) -> U32:
   match bs:
     case Basis{eye, fwd, rgt, upv, hx, hy, ix, iy}:
       +u = ((U32.to_f32(x) + 0.5) * ix - hx : F32)
@@ -255,7 +255,7 @@ def Render.pixel(bs: Basis, balls: S.Blobs, x: U32, y: U32) -> U32:
 # what Bend's fork-join scheduler needs to spread the frame over every core or
 # GPU lane.
 def Render.tile(+d: Nat, +step: U32, +x: U32, +y: U32, +bs: Basis,
-  +balls: S.Blobs) -> Image:
+  +balls: S.Cloud) -> Image:
   match d:
     case 0n:
       Pix{Render.pixel(bs, balls, x, y)}
@@ -278,7 +278,7 @@ def Render.size(+d: Nat) -> U32:
 # serial loop on the CPU and a CUDA kernel on the GPU. Rendering on the CPU
 # with the GPU enabled is worse than either, because the corpus then lives in
 # managed memory and every CPU thread pays for it.
-def Render.at(+d: Nat, c: Cam, +balls: S.Blobs) -> Image:
+def Render.at(+d: Nat, c: Cam, +balls: S.Cloud) -> Image:
   Render.tile!(d, Render.size(d), 0, 0,
     Basis.of(c, U32.to_f32(Render.WIDTH()), U32.to_f32(Render.HEIGHT())),
     balls)
@@ -286,7 +286,7 @@ def Render.at(+d: Nat, c: Cam, +balls: S.Blobs) -> Image:
 # There is only one resolution. An earlier version dropped to a shallower
 # tree while the mouse was down; at depth 11 the frame holds ~40 fps, so the
 # quality never has to drop.
-def Render.frame(c: Cam, +balls: S.Blobs) -> Image:
+def Render.frame(c: Cam, +balls: S.Cloud) -> Image:
   Render.at(Render.FULL_D(), c, balls)
 
 # The camera frame for the live window, used by the spawner to turn a clicked

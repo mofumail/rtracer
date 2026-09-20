@@ -27,7 +27,7 @@ import ./render.bend as R
 law frame_pixels:
   for +d: Nat
   for +c: R.Cam
-  for +balls: S.Blobs
+  for +balls: S.Cloud
   {R.Img.count(d, R.Render.at(d, c, balls)) == Nat.pow(4n, d) : Nat}
 
 # 2. Every colour channel is clamped to 0-255.
@@ -66,6 +66,6 @@ law bounce_depth:
   for +ro: V.V3
   for +rd: V.V3
   for +w: F32
-  for +balls: S.Blobs
+  for +balls: S.Cloud
   {Nat.is_le(S.Trace.depth(S.Scene.MAX_DEPTH(), go, c, ro, rd, w, balls),
     S.Scene.MAX_DEPTH()) == True{} : Bool}

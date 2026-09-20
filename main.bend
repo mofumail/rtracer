@@ -122,7 +122,7 @@ def Spawn.where(cam: R.Cam, balls: S.Blobs, x: U32, y: U32) -> V.V3:
   +bs = R.Render.basis(cam)
   +ro = R.Basis.eye(bs)
   +rd = R.Render.ray(bs, x, y)
-  Spawn.point(S.Scene.find(balls, ro, rd), ro, rd)
+  Spawn.point(S.Scene.find(P.Phys.cloud(balls), ro, rd), ro, rd)
 
 # Random radius, colour and a little random gloss.
 def Spawn.ball(+seed: U32, at: V.V3) -> S.Ball:
@@ -336,7 +336,8 @@ def View(s: St) -> Pair(St, Image):
   match s:
     case St{cam, ptr, +balls, seed, live}:
       +cam = cam
-      (St{cam, ptr, balls, seed, live}, R.Render.frame(cam, balls))
+      (St{cam, ptr, balls, seed, live},
+        R.Render.frame(cam, P.Phys.cloud(balls)))
 
 def Tick(evs: List<Event>, s: St) -> IO(Maybe<St>):
   IO.pure(Maybe<St>, St.advance(St.step(evs, s)))

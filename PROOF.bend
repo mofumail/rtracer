@@ -72,7 +72,7 @@ law tile_pixels:
   for +x: U32
   for +y: U32
   for +bs: R.Basis
-  for +balls: S.Blobs
+  for +balls: S.Cloud
   {R.Img.count(d, R.Render.tile(d, step, x, y, bs, balls)) ==
     Nat.pow(4n, d) : Nat}
 
@@ -178,7 +178,7 @@ law depth_le:
   for +ro: V.V3
   for +rd: V.V3
   for +w: F32
-  for +balls: S.Blobs
+  for +balls: S.Cloud
   {Nat.is_le(S.Trace.depth(d, go, c, ro, rd, w, balls), d) == True{} : Bool}
 
 def depth_le(d, go, c, ro, rd, w, balls):
