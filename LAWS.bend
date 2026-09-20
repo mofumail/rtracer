@@ -49,13 +49,18 @@ law pitch_in_range:
 
 # 4. Reflection recursion never exceeds a fixed max depth.
 #
-# `Trace.depth` counts the bounces `Trace` takes on the same inputs, sharing
-# its ray-generation defs, so this bounds the renderer rather than a separate
-# copy of it: from any hit, any ray, the tracer returns within MAX_DEPTH
-# bounces.
+# `Trace.depth` counts the bounces `Trace` takes on the same inputs, branching
+# the same way and sharing its ray-generation defs, so this bounds the renderer
+# rather than a separate copy of it: from any hit, any ray, and any starting
+# weight, the tracer returns within MAX_DEPTH bounces.
+#
+# The adaptive cutoff can only end a chain sooner, never later, so this still
+# holds now that a bounce is skipped once its contribution gets too small.
 law bounce_depth:
-  for +h: S.Hit
+  for go: Bool
+  for +c: S.Cand
   for +ro: V.V3
   for +rd: V.V3
-  {Nat.is_le(S.Trace.depth(S.Scene.MAX_DEPTH(), h, ro, rd),
+  for +w: F32
+  {Nat.is_le(S.Trace.depth(S.Scene.MAX_DEPTH(), go, c, ro, rd, w),
     S.Scene.MAX_DEPTH()) == True{} : Bool}

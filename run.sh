@@ -77,6 +77,7 @@ build() {
 }
 
 bench() {
+  echo "(headless trace only, with a forcing pass -- not frame times)"
   echo "== 1) CPU, single thread =="
   ./bench --gpu off --threads 1
   echo
@@ -93,7 +94,9 @@ case "${1:-all}" in
   build)  build ;;
   bench)  build; bench ;;
   all)    doctor; echo; proof; echo; build; echo
-          echo "== opening the viewer: drag to orbit, Up/Down to zoom, Esc to quit =="
+          echo "== viewer: left-drag orbits, right-drag zooms, Up/Down also zoom, Esc quits =="
+          echo "   (the mouse wheel cannot be used -- Bend 2.0.5 discards wheel"
+          echo "    events before a program sees them; see NOTES-BEND.md)"
           ./rtracer ;;
   *)      echo "usage: $0 [all|doctor|proof|build|bench]" >&2; exit 2 ;;
 esac

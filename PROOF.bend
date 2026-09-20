@@ -93,7 +93,8 @@ def tile_pixels(d, step, x, y, bs):
 
 def Laws.frame_pixels(d, c):
   tile_pixels(d, R.Render.size(d), 0, 0,
-    R.Basis.of(c, U32.to_f32(R.Render.size(d))))
+    R.Basis.of(c, U32.to_f32(R.Render.WIDTH()),
+      U32.to_f32(R.Render.HEIGHT())))
 
 # -- Law 2: colour channels are bounded ---------------------------------------
 
@@ -169,26 +170,35 @@ def Laws.pitch_in_range(v, dn, up):
 # hypothesis, so the proof is the recursive call itself.
 law depth_le:
   for +d: Nat
-  for +h: S.Hit
+  for go: Bool
+  for +c: S.Cand
   for +ro: V.V3
   for +rd: V.V3
-  {Nat.is_le(S.Trace.depth(d, h, ro, rd), d) == True{} : Bool}
+  for +w: F32
+  {Nat.is_le(S.Trace.depth(d, go, c, ro, rd, w), d) == True{} : Bool}
 
-def depth_le(d, h, ro, rd):
+def depth_le(d, go, c, ro, rd, w):
   match d:
     case 0n:
-      match h:
-        case S.Miss{}:
-          {==}
-        case S.Near{t, pos, nrm, alb, refl}:
-          {==}
+      {==}
     case 1n+p:
-      match h:
-        case S.Miss{}:
+      match go:
+        case False{}:
           {==}
-        case S.Near{t, +pos, +nrm, alb, refl}:
-          depth_le(p, S.Scene.hit(S.Trace.org(pos, nrm), S.Trace.dir(rd, nrm)),
-            S.Trace.org(pos, nrm), S.Trace.dir(rd, nrm))
+        case True{}:
+          match c:
+            case S.Void{}:
+              {==}
+            case S.Cand{+t, ctr, alb, +refl, flat}:
+              +pos = V.V3.add(ro, V.V3.scale(rd, t))
+              +nrm = S.Cand.nrm(flat, pos, ctr)
+              +ro2 = S.Trace.org(pos, nrm)
+              +rd2 = S.Trace.dir(rd, nrm)
+              +c2 = S.Scene.find(ro2, rd2)
+              +w2 = (w * refl : F32)
+              depth_le(p,
+                F32.is_gt((w2 * S.Cand.refl(c2) : F32), S.Scene.MIN_W()), c2,
+                ro2, rd2, w2)
 
-def Laws.bounce_depth(h, ro, rd):
-  depth_le(S.Scene.MAX_DEPTH(), h, ro, rd)
+def Laws.bounce_depth(go, c, ro, rd, w):
+  depth_le(S.Scene.MAX_DEPTH(), go, c, ro, rd, w)

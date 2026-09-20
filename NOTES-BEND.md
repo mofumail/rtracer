@@ -115,7 +115,58 @@ version wording to "CUDA 12 or newer".
 
 ---
 
-### 6. Smaller things
+### 6. The window drops mouse-wheel events
+
+X11 reports the scroll wheel as buttons 4 and 5, and Bend's event pump keeps
+only buttons 1 to 3:
+
+```c
+} else if (ev.type == ButtonPress || ev.type == ButtonRelease) {
+  u32 b = ev.xbutton.button;
+  if (b >= 1 && b <= 3) {                 // 4 and 5 are the wheel
+    window_push(win, 1, ..., b == 1 ? 0 : 4 - b, ...);
+```
+
+So a Bend program cannot see the wheel at all, and there is no `Event`
+constructor for a scroll either. Verified with an event probe: left, right and
+middle arrive as `Mouse(..., b0/b1/b2, ...)`, while `xdotool click 4` and
+`click 5` produce nothing. `XSelectInput` already asks for `ButtonPressMask`,
+so the events do reach the pump and are then discarded.
+
+This one is a real functional gap rather than an ergonomic wrinkle — zoom on
+the wheel is the default idiom for any 3D viewer. This project puts zoom on a
+right-button drag instead.
+
+Suggestion: pass buttons 4 and 5 through (they would fall out as buttons 3 and
+-1 under the current `4 - b` mapping, so the mapping needs widening too), or
+add a `Scroll{x, y, dx, dy}` event.
+
+---
+
+### 7. A 2K frame is dominated by Image allocation, not by user code
+
+At 1920x1080 the frame is a depth-11 quadtree: 4.19M `Pix` nodes plus ~1.4M
+`Qua` nodes, allocated and freed every frame. Replacing the whole ray tracer
+with `Pix{(x + y : U32)}` — no intersections, no shading, no recursion — still
+costs 22 ms/frame end to end, against 21-29 ms for the real renderer.
+
+In other words the shading is roughly 5 ms and the tree is roughly 22 ms, so
+tuning the tracer has almost no effect on the frame rate. This was worth
+knowing before optimizing: the obvious wins (a cheap occlusion-only shadow
+traversal, deferring the normal to the winning hit, an adaptive bounce cutoff)
+together bought about 10% end to end, because they were aimed at the small
+half of the budget.
+
+Not obviously a bug, but the cost is invisible from the source: nothing in
+`Qua{tl, tr, bl, br}` suggests it is the expensive part of a ray tracer.
+Something in the guide about the per-node cost of `Image`, or a way to build a
+frame without one node per pixel, would help. The GPU is hit hardest: bare
+tree construction at 2048x2048 costs 26.5 ms on the GPU against 5.2 ms on 32
+CPU threads, which is the reverse of the ratio for the arithmetic.
+
+---
+
+### 8. Smaller things
 
 * **`String.is_eq` is missing.** Base has `is_eq` for `Nat`, `U32`, `F32`,
   `Bool` and `Cmp`, and the guide says the verbs recur across types, so its
@@ -133,11 +184,37 @@ version wording to "CUDA 12 or newer".
 
 ---
 
+### 9. Unexplained: the same frame costs ~4x less inside a window app
+
+Rendering depth 10 (1024x1024) with `--gpu off --threads 1`:
+
+* headless, `Img.count(10n, Render.at(10n, cam))` in a loop: **124 ms/frame**
+* the same `Render.at` driven by `App.run` into a 1024x1024 window, timed
+  across 20 frames with `IO.now`: **29 ms/frame**, and that figure *includes*
+  the serial blit
+
+Things ruled out:
+
+* **Not laziness.** `Img.count` matches `Pix{c}` and never reads `c`, while
+  `Img.sum` returns it; they cost 124 ms and 117 ms, so the colour is computed
+  either way.
+* **Not visibility.** At 1024x1024 with a depth-10 tree every leaf is on
+  screen, so the blit demands all of them.
+* **Not the camera.** Both use the same `Cam{450, 1005, 780}`.
+
+So the same frame, the same thread count, ~4x apart depending on whether a
+window is driving it. Either the headless loop is doing avoidable work (the
+accumulator chain?), or `--threads 1` does not mean the same thing once the
+event loop is running. Worth a look from someone who knows the scheduler.
+
+---
+
 ### Not a bug: the GPU loses to 32 CPU cores here
 
 Worth recording since it is counter-intuitive for a renderer. At 1024×1024
-this scene takes 10.8 ms on 32 CPU threads and 19.2 ms on an RTX 4070 Ti, and
-the ratio holds across frame sizes. This is consistent with what the guide
+the headless trace takes 37.7 ms on 32 CPU threads and 51.0 ms on an RTX
+4070 Ti, and the ratio holds across frame sizes. (In the windowed app the GPU
+still wins overall, because the window's blit is serial on the CPU.) This is consistent with what the guide
 says — divergent work stays faster on the CPU — and a ray tracer is divergent:
 a ray that misses everything returns the sky immediately, while the lane next
 to it runs three bounces with a shadow ray each. The quadtree split itself

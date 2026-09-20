@@ -1,13 +1,18 @@
 # A headless timing harness: renders a fixed set of frames and reports the
 # average frame time, so the same binary can be measured under
 # `--gpu off --threads 1`, `--gpu off`, and the GPU default.
+#
+# This measures tracing only. It walks the finished frame with `Img.sum` so
+# that nothing can be skipped, which is work the real app does not do -- the
+# window blit reads the tree instead. Treat these as a comparison between
+# backends, not as frame times; README has the end-to-end figures.
 
 import Base
 import ./render.bend as R
 
 # `Img.sum` walks the whole frame, so nothing can be skipped.
 def Bench.one(+d: Nat, yaw: U32) -> U32:
-  R.Img.sum(d, R.Render.at(d, R.Cam{yaw, 980, 90}))
+  R.Img.sum(d, R.Render.at(d, R.Cam{yaw, 1005, 780}))
 
 def Bench.loop(n: Nat, +d: Nat, +yaw: U32, acc: U32) -> U32:
   match n:
@@ -34,6 +39,6 @@ def Bench.run(name: String, +d: Nat, +n: Nat) -> IO(Unit):
 
 def main() -> IO(Unit):
   do IO<Unit>:
-    Bench.run("128x128  (drag)  ", R.Render.DRAG_D(), 200n)
-    Bench.run("512x512  (full)  ", R.Render.FULL_D(), 60n)
+    Bench.run("512x512          ", 9n, 60n)
     Bench.run("1024x1024        ", 10n, 20n)
+    Bench.run("2048x2048  (2K)  ", R.Render.FULL_D(), 10n)

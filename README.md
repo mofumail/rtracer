@@ -4,8 +4,8 @@ An interactive ray tracer written entirely in [Bend](https://bend-lang.com).
 The renderer, the window, the input handling and the proofs are all Bend —
 there is no C, no CUDA, no Metal and no Python viewer.
 
-Drag with the mouse to orbit the camera. The frame renders at 128×128 while
-the button is down and at 512×512 when you let go.
+Drag to orbit the camera. Every frame is traced at full 1920×1080 — the
+resolution never drops while you move.
 
 ![the scene](docs/scene.png)
 
@@ -25,7 +25,13 @@ the viewer. Other entry points:
 | `./run.sh build` | build `./rtracer` and `./bench` |
 | `./run.sh bench` | time the renderer on 1 core, all cores, and the GPU |
 
-**Controls** — drag to orbit · `Up`/`Down` to zoom · `Esc` or the close box to quit.
+**Controls** — left-drag to orbit · **right-drag up/down to zoom** · `Up`/`Down`
+keys also zoom · `Esc` or the close box to quit.
+
+> Zoom is on the right button rather than the wheel because **Bend 2.0.5 cannot
+> see the wheel at all**: X11 reports it as buttons 4 and 5, and Bend's event
+> pump keeps only buttons 1–3, so the events are discarded before any program
+> sees them. See `NOTES-BEND.md` §6.
 
 ### Requirements
 
@@ -74,40 +80,79 @@ input stay on the CPU, in `main.bend`.
 
 Two details worth knowing:
 
-* **Frames are powers of two.** The window picks `k` with `2^k ≥ max(w,h)` and
-  indexes the quadtree by the bits of x and y, so a square power-of-two frame
-  maps to the tree exactly. A 640×480 window would mean building a 1024×1024
-  tree and showing a corner of it — 3.4× wasted work, or an unbalanced tree if
-  you prune. 512×512 and 128×128 avoid the problem entirely.
-* **Low resolution is free.** A `Pix` reached before level `k` fills its whole
-  subsquare, so the 128×128 drag frame is simply a tree that stops two levels
-  early, and the window scales it up. There is no separate downscale path.
+* **The tree is square and power-of-two.** The window picks `k` with
+  `2^k ≥ max(w,h)` and indexes the quadtree by the bits of x and y. For
+  1920×1080 that is `k = 11`, so the frame is a 2048×2048 tree whose top-left
+  corner is shown. The rays are aimed at the *visible* rectangle rather than
+  at the square, so the picture stays centred and correctly proportioned; the
+  extra columns and rows are simply traced and never looked at.
+* **The ~50% waste is not fixable by pruning.** Skipping the off-screen
+  quadrants would halve the rays, but it unbalances the split, and Bend's
+  scheduler hands every task to a core once and never moves it — the idle
+  lanes give the saving straight back.
 
 The frame is cached in the app state and only re-rendered when an event moves
 the camera; `App.run` calls `view` at 60 Hz, and re-tracing an unchanged scene
 every frame would keep the GPU busy for nothing.
 
+### Why the GPU, when the CPU traces rays faster
+
+The window's own blit walks the tree once per screen pixel. That walk is a
+**serial** loop on the CPU and a CUDA kernel on the GPU, which changes which
+lane wins end to end:
+
+| | trace | blit | total |
+| --- | ---: | ---: | ---: |
+| GPU | slower | ~free | **best** |
+| CPU, 32 threads | faster | ~33 ms at 2K | worse |
+
+Rendering on the CPU *with* the GPU enabled is worse than either, because the
+corpus then lives in managed memory and every CPU thread pays for it — measured
+at 38 ms against 26 ms for the same work with `--gpu off`.
+
 ## Benchmarks
 
-RTX 4070 Ti, 32-thread CPU, three reflection bounces, µs per frame:
+**What you actually feel** — time per frame in the running app at 1920×1080,
+full resolution, camera moving every frame (so nothing is served from cache):
 
-| frame | `--gpu off --threads 1` | `--gpu off` (32 threads) | GPU (default) |
+| backend | ms/frame | |
+| --- | ---: | --- |
+| GPU (default) | **17** | ~59 fps — what ships |
+| CPU, 32 threads, `--gpu off` | 44 | ~23 fps |
+| CPU, 1 thread, `--gpu off --threads 1` | 74 | ~14 fps |
+
+The GPU wins end to end even though the CPU traces rays faster, because the
+window's blit is a serial loop on the CPU and a CUDA kernel on the GPU. See
+*Why the GPU* above.
+
+**Where the time goes.** Replacing the entire ray tracer with
+`Pix{(x + y : U32)}` — no intersections, no shading, no recursion — still costs
+**22 ms/frame**. At 2K the frame is a depth-11 quadtree: 4.19M `Pix` nodes plus
+~1.4M `Qua` nodes built and freed every frame, and that allocation, not the
+shading, is the budget. Tuning the tracer further would be wasted effort.
+
+That is also why the tracer rewrite (occlusion-only shadow rays, deferring the
+normal to the winning hit, an adaptive bounce cutoff) bought only ~10% end to
+end: it was aimed at the small half of the budget. It is still better code, and
+it is what makes the adaptive-depth law interesting.
+
+**Backend comparison, headless** — `./run.sh bench` traces frames with no
+window and walks each one with `Img.sum` so nothing can be skipped:
+
+| frame | 1 thread | 32 threads | GPU |
 | --- | ---: | ---: | ---: |
-| 128×128 (drag) | 1 995 | **515** | 940 |
-| 512×512 (full) | 28 433 | **3 016** | 5 116 |
-| 1024×1024 | 112 600 | **10 800** | 19 150 |
+| 512×512 | 22 816 | **2 333** | 3 883 |
+| 1024×1024 | 115 050 | **10 750** | 15 400 |
+| 2048×2048 | 459 000 | **37 700** | 51 000 |
 
-Reproduce with `./run.sh bench`; run-to-run variation is around 10%, most of
-it on the GPU row. All three configurations produce identical frame checksums,
-which is a decent end-to-end check that the CPU and GPU lanes agree.
+(µs/frame. All three backends produce identical checksums, which is a decent
+end-to-end check that the CPU and GPU lanes agree.)
 
-The 32-core CPU beats the GPU here by about 1.7×, and the gap is stable across
-frame sizes. That matches what `bend guide` says to expect: the GPU wins on
-uniform numeric work and loses on divergent work, and a ray tracer is
-divergent — a ray that hits nothing returns the sky immediately while its
-neighbour runs three bounces and three shadow rays. Scaling from 1 to 32
-threads gives 10.4× at 1024×1024, so the quadtree split itself parallelises
-well; it is the per-lane divergence that costs the GPU.
+These two tables are measured differently and should not be compared with each
+other: the headless figures include a full extra `Img.sum` traversal that the
+app never does. They disagree by more than that pass alone accounts for — about
+4× at one thread — which I have not been able to explain; `NOTES-BEND.md` §9
+records it rather than guessing.
 
 ## The laws
 
@@ -120,7 +165,7 @@ well; it is the per-lane divergence that costs the GPU.
 | `frame_pixels` | a frame rendered at depth `d` has exactly `4^d` pixels — `Img.count` only counts a tree exactly `d` levels deep, so the renderer never stops early or splits too far |
 | `channel_bounded` | every colour channel is ≤ 255, for **any** float — including the infinities and NaNs a degenerate ray can produce |
 | `pitch_in_range` | after any drag, any distance, either direction, the camera's pitch is still within ±89°, so it can never flip |
-| `bounce_depth` | from any hit and any ray, the reflection recursion returns within `MAX_DEPTH` bounces |
+| `bounce_depth` | from any hit, any ray and any starting weight, the reflection recursion returns within `MAX_DEPTH` bounces — the adaptive cutoff can only end a chain sooner, never later |
 
 All four are about structure and integer bounds, never float precision. That
 is forced: Bend's `F32` operations are declared as `law F32.add` and friends,

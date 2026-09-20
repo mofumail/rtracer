@@ -15,20 +15,25 @@ import ./scene.bend as S
 
 # -- Resolution ---------------------------------------------------------------
 
-# An Image is a quadtree over a 2^k square, so the natural frame sizes are
-# powers of two. Depth 9 is 512x512; depth 7 is 128x128, which the window
-# scales up by leaving each Pix covering a 4x4 block.
+# An Image is a quadtree over a 2^k square, and the window walks it with
+# k = the smallest power of two covering max(w, h). For a 1920x1080 window
+# that is k = 11, so the frame is a 2048x2048 tree and the window shows its
+# top-left corner. The rays are aimed at the *visible* rectangle (see
+# `Basis.of`), not at the square, so the extra columns and rows are simply
+# traced and never looked at.
+#
+# The waste is unavoidable rather than sloppy: pruning the off-screen
+# quadrants would save about half the rays but unbalance the split, and Bend
+# hands every task to a core once and never moves it, so the idle lanes would
+# give the saving straight back.
 def Render.FULL_D() -> Nat:
-  9n
-
-def Render.DRAG_D() -> Nat:
-  7n
+  11n
 
 def Render.WIDTH() -> U32:
-  512
+  1920
 
 def Render.HEIGHT() -> U32:
-  512
+  1080
 
 # -- Colour -------------------------------------------------------------------
 
@@ -67,7 +72,7 @@ def Color.pack(c: V.V3) -> U32:
 
 # yaw and pitch are tenths of a degree. pitch runs 0..1780 and decodes to
 # -89.0..+89.0, so the camera can never reach the poles and flip over.
-# dist is tenths of a world unit.
+# dist is hundredths of a world unit.
 type Cam is Data:
   Cam{yaw: U32, pitch: U32, dist: U32}
 
@@ -77,18 +82,24 @@ def Cam.PITCH_MAX() -> U32:
 def Cam.YAW_WRAP() -> U32:
   3600
 
+# Distance is held in hundredths of a world unit rather than tenths: a mouse
+# drag moves it a few units per hundred pixels, and tenths were too coarse a
+# step to express that without jumping.
 def Cam.DIST_MIN() -> U32:
-  25
+  250
 
 def Cam.DIST_MAX() -> U32:
-  260
+  2600
 
 def Cam.TARGET() -> V.V3:
   V.V3{0.0, 0.95, 0.0}
 
-# tan(fov/2) for a 60 degree vertical field of view.
+# tan(vfov/2) for a 40 degree *vertical* field of view. On a 16:9 frame the
+# horizontal one works out at about 66 degrees; fixing the vertical angle and
+# deriving the horizontal is what keeps a widescreen frame from turning into
+# a fisheye.
 def Cam.TANHALF() -> F32:
-  0.5774
+  0.36397
 
 def Cam.pitch_ok(+v: U32) -> Bool:
   U32.is_le(v, Cam.PITCH_MAX())
@@ -157,7 +168,7 @@ def Cam.pitch_rad(v: U32) -> F32:
   ((U32.to_f32(v) * 0.1 - 89.0) * Cam.DEG() : F32)
 
 def Cam.dist_f(v: U32) -> F32:
-  (U32.to_f32(v) * 0.1 : F32)
+  (U32.to_f32(v) * 0.01 : F32)
 
 def Cam.eye(c: Cam) -> V.V3:
   match c:
@@ -174,23 +185,31 @@ def Cam.eye(c: Cam) -> V.V3:
 # The camera frame, built once per frame and carried down the quadtree so the
 # per-pixel work is two multiply-adds and a normalize rather than four trig
 # calls.
+#
+# hx/hy are the half-extents of the image plane and ix/iy the per-pixel step.
+# They are derived from the *visible* rectangle, so the picture stays centred
+# and correctly proportioned even though the tree it lives in is square.
 type Basis is Data:
-  Basis{eye: V.V3, fwd: V.V3, rgt: V.V3, upv: V.V3, inv: F32}
+  Basis{eye: V.V3, fwd: V.V3, rgt: V.V3, upv: V.V3, hx: F32, hy: F32,
+    ix: F32, iy: F32}
 
-def Basis.of(c: Cam, size: F32) -> Basis:
+def Basis.of(c: Cam, +vw: F32, +vh: F32) -> Basis:
   +eye = Cam.eye(c)
   +fwd = V.V3.norm(V.V3.sub(Cam.TARGET(), eye))
   +rgt = V.V3.norm(V.V3.cross(fwd, V.V3{0.0, 1.0, 0.0}))
-  Basis{eye, fwd, rgt, V.V3.cross(rgt, fwd),
-    (2.0 * Cam.TANHALF() / size : F32)}
+  # Vertical field of view is fixed; the horizontal one follows the aspect.
+  +hy = Cam.TANHALF()
+  +hx = (hy * vw / vh : F32)
+  Basis{eye, fwd, rgt, V.V3.cross(rgt, fwd), hx, hy,
+    (2.0 * hx / vw : F32), (2.0 * hy / vh : F32)}
 
 def Render.pixel(bs: Basis, x: U32, y: U32) -> U32:
   match bs:
-    case Basis{eye, fwd, rgt, upv, +inv}:
-      # Pixel centres, mapped to [-tanhalf, +tanhalf]; y is flipped because
-      # the window's rows run downwards.
-      +u = ((U32.to_f32(x) + 0.5) * inv - Cam.TANHALF() : F32)
-      +v = (Cam.TANHALF() - (U32.to_f32(y) + 0.5) * inv : F32)
+    case Basis{eye, fwd, rgt, upv, hx, hy, ix, iy}:
+      # Pixel centres on the image plane; y is flipped because the window's
+      # rows run downwards.
+      +u = ((U32.to_f32(x) + 0.5) * ix - hx : F32)
+      +v = (hy - (U32.to_f32(y) + 0.5) * iy : F32)
       rd = V.V3.norm(V.V3.add(fwd,
         V.V3.add(V.V3.scale(rgt, u), V.V3.scale(upv, v))))
       Color.pack(S.Trace.start(eye, rd))
@@ -219,21 +238,21 @@ def Render.size(+d: Nat) -> U32:
 
 # `!` hands the whole tree to the GPU; every parallel call inside it goes
 # there too.
+#
+# The GPU is the right lane here even though the CPU traces rays faster: the
+# window's own blit walks the tree once per screen pixel, and that walk is a
+# serial loop on the CPU and a CUDA kernel on the GPU. Rendering on the CPU
+# with the GPU enabled is worse than either, because the corpus then lives in
+# managed memory and every CPU thread pays for it.
 def Render.at(+d: Nat, c: Cam) -> Image:
-  +n = Render.size(d)
-  Render.tile!(d, n, 0, 0, Basis.of(c, U32.to_f32(n)))
+  Render.tile!(d, Render.size(d), 0, 0,
+    Basis.of(c, U32.to_f32(Render.WIDTH()), U32.to_f32(Render.HEIGHT())))
 
-def Render.frame.go(low: Bool, c: Cam) -> Image:
-  match low:
-    case True{}:
-      Render.at(Render.DRAG_D(), c)
-    case False{}:
-      Render.at(Render.FULL_D(), c)
-
-# While the mouse is down the frame is rendered at 128x128 and the window
-# scales it up; on release it is redrawn at 512x512.
-def Render.frame(low: Bool, c: Cam) -> Image:
-  Render.frame.go(low, c)
+# There is only one resolution. An earlier version dropped to a shallower
+# tree while the mouse was down; at depth 11 the frame holds ~40 fps, so the
+# quality never has to drop.
+def Render.frame(c: Cam) -> Image:
+  Render.at(Render.FULL_D(), c)
 
 # -- Frame shape --------------------------------------------------------------
 
