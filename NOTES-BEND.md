@@ -259,6 +259,38 @@ event loop is running. Worth a look from someone who knows the scheduler.
 
 ---
 
+### 12. Unexplained: threading one more parameter through the tracer costs 2.5x
+
+Adding a scene parameter (the user-dropped balls) to the hot path took the
+frame from 22 ms to ~52 ms at 1920x1080 — **with an empty list**, so no extra
+intersection work is being done. The parameter is added to `Trace`,
+`Trace.depth`, `Trace.leaf`, `Scene.find`, `Scene.shadowed` and `Shade.local`.
+
+Ruled out, each by measurement:
+
+* **Not the data.** An empty cloud costs the same as fourteen balls once the
+  bounding volume is in (52 ms vs 53 ms).
+* **Not threading it down the quadtree.** Passing a literal empty list at
+  every leaf instead of carrying the parameter: still 50 ms.
+* **Not Base's polymorphic `List`.** Replacing `List<&2, Ball>` with a
+  monomorphic `Blobs` type changed nothing.
+* **Not record duplication.** `Render.pixel` was briefly taking `+bs: Basis`
+  and using it twice; fixing that to destructure once changed nothing.
+* **Not the bound test.** Short-circuiting an empty cloud on a constructor
+  match, before any intersection, changed nothing.
+
+What *did* move it: deleting the call entirely. Replacing
+`Cloud.shadowed(balls, ro, rd)` with `False{}` recovered 15 ms of the 30.
+
+That pattern — the cost tracks whether the call is *present*, not what it
+does — points at a compilation effect rather than arithmetic, which would fit
+the inlining threshold hinted at in `comp.ts` ("a native with this many lines
+or more is a call on both lanes ... at 128 raytrace lost 31% on PAR-CPU").
+If that is what this is, a way to see or control it would help a lot: right
+now adding one argument to a hot function can cost 2.5x with no diagnostic.
+
+---
+
 ### Not a bug: the GPU loses to 32 CPU cores here
 
 Worth recording since it is counter-intuitive for a renderer. At 1024×1024

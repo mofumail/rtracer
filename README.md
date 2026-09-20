@@ -26,7 +26,7 @@ the viewer. Other entry points:
 | `./run.sh bench` | time the renderer on 1 core, all cores, and the GPU |
 
 **Controls** — left-drag to orbit · **right-drag up/down to zoom** · `Up`/`Down`
-keys also zoom · `Esc` or the close box to quit.
+keys also zoom · **shift-click to drop a ball** · `Esc` or the close box to quit.
 
 > Zoom is on the right button rather than the wheel because **Bend 2.0.5 cannot
 > see the wheel at all**: X11 reports it as buttons 4 and 5, and Bend's event
@@ -44,6 +44,52 @@ keys also zoom · `Esc` or the close box to quit.
 
 Without a GPU everything still builds and runs — Bend executes `!` calls in
 parallel on the CPU instead.
+
+## Dropping balls
+
+Shift-click anywhere and a ball of random size and colour appears a little
+above whatever is under the cursor, falls, and settles. It collides with the
+floor, with the five fixed spheres, and with the other dropped balls: land one
+on the mirror sphere and it rolls off; land one on another ball and it stacks.
+The oldest ball retires once there are more than `Phys.MAX()` of them.
+
+The physics is a frame-at-a-time integrator with positional correction: each
+ball is resolved against everything else treated as immovable. That is not
+momentum-conserving, but it keeps every ball's update independent of the
+others', so the list is walked once per frame instead of iterated to a fixed
+point, and a ball settling onto a sphere or a pile looks right.
+
+Balls are randomised from an LCG whose seed lives in the app state, so the
+renderer stays pure and a given sequence of clicks is reproducible.
+
+### What this costs
+
+Adding objects to a brute-force tracer is expensive: every ball is another
+intersection on every bounce *and* every shadow ray, of every one of 4.19M
+pixels. Measured at 1920x1080 before any acceleration:
+
+| balls | ms/frame | fps |
+| ---: | ---: | ---: |
+| 0 | 50 | 20 |
+| 5 | 121 | 8 |
+| 14 | 366 | 2.7 |
+
+So the balls are wrapped in a `Cloud`: a sphere enclosing all of them,
+rebuilt once per frame and tested once per ray. A ray that misses the bound
+skips the whole list, which is most rays — the sky, the far floor, and shadow
+rays pointing up and away. That flattens the curve completely:
+
+| balls | ms/frame | fps |
+| ---: | ---: | ---: |
+| 0 | 52 | 19 |
+| 5 | 53 | 19 |
+| 14 | 53–59 | 17–19 |
+
+Ball count no longer matters. What remains is a fixed ~30 ms that appears as
+soon as the ball parameter is threaded through the tracer at all — it is there
+with an empty cloud, and it is not the work being done. See `NOTES-BEND.md`
+§12; the honest summary is that the feature costs about 2.5x and I could not
+account for it.
 
 ## The scene
 

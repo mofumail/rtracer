@@ -114,7 +114,8 @@ case "${1:-all}" in
   build)  build ;;
   bench)  build; bench ;;
   all)    doctor; echo; proof; echo; build; echo
-          echo "== viewer: left-drag orbits, right-drag zooms, Up/Down also zoom, Esc quits =="
+          echo "== viewer: left-drag orbits, right-drag zooms, shift-click drops a ball,"
+          echo "   Up/Down also zoom, Esc quits =="
           echo "   (the mouse wheel cannot be used -- Bend 2.0.5 discards wheel"
           echo "    events before a program sees them; see NOTES-BEND.md)"
           ./rtracer ;;
