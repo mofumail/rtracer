@@ -1,0 +1,39 @@
+# A headless timing harness: renders a fixed set of frames and reports the
+# average frame time, so the same binary can be measured under
+# `--gpu off --threads 1`, `--gpu off`, and the GPU default.
+
+import Base
+import ./render.bend as R
+
+# `Img.sum` walks the whole frame, so nothing can be skipped.
+def Bench.one(+d: Nat, yaw: U32) -> U32:
+  R.Img.sum(d, R.Render.at(d, R.Cam{yaw, 980, 90}))
+
+def Bench.loop(n: Nat, +d: Nat, +yaw: U32, acc: U32) -> U32:
+  match n:
+    case 0n:
+      acc
+    case 1n+p:
+      Bench.loop(p, d, (yaw + 137 : U32), (acc + Bench.one(d, yaw) : U32))
+
+# Frame times are reported in microseconds, since a small frame on 32 cores
+# lands well under the 1 ms resolution of IO.now.
+def Bench.report(name: String, +n: Nat, t0: Nat, t1: Nat, sum: U32) ->
+  IO(Unit):
+  +us = Nat.mul(Nat.sub(t1, t0), 1000n)
+  IO.print(name ++ "  " ++ Nat.show(Nat.div(us, n)) ++ " us/frame  (" ++
+    Nat.show(Nat.div(us, 1000n)) ++ " ms over " ++ Nat.show(n) ++
+    " frames, checksum " ++ U32.show(sum) ++ ")")
+
+def Bench.run(name: String, +d: Nat, +n: Nat) -> IO(Unit):
+  do IO<Unit>:
+    t0 : Nat <- IO.now()
+    sum : U32 <- IO.pure(U32, Bench.loop(n, d, 0, 0))
+    t1 : Nat <- IO.now()
+    Bench.report(name, n, t0, t1, sum)
+
+def main() -> IO(Unit):
+  do IO<Unit>:
+    Bench.run("128x128  (drag)  ", R.Render.DRAG_D(), 200n)
+    Bench.run("512x512  (full)  ", R.Render.FULL_D(), 60n)
+    Bench.run("1024x1024        ", 10n, 20n)
