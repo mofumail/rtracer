@@ -34,6 +34,19 @@ type Cand is Data:
   Void{}
   Cand{t: F32, ctr: V.V3, alb: V.V3, refl: F32, flat: Bool}
 
+# A ball the user dropped into the scene. Same shape as a static sphere, plus
+# the state the physics needs. `id` is what lets a ball skip itself when it
+# collides against the rest of the list.
+type Ball is Data:
+  Ball{id: U32, pos: V.V3, vel: V.V3, rad: F32, alb: V.V3, refl: F32}
+
+# A monomorphic list of balls rather than Base's `List<&2, Ball>`. The
+# polymorphic one is carried through the whole tracer, and every bounce
+# duplicates it; specialising it here is worth more than it looks.
+type Blobs is Data:
+  BNil{}
+  BCons{head: Ball, tail: Blobs}
+
 def Scene.EPS() -> F32:
   0.001
 
@@ -170,16 +183,31 @@ def Sph.cand(ro: V.V3, rd: V.V3, +ctr: V.V3, +rad: F32, alb: V.V3,
   +disc = (b * b - c : F32)
   Sph.cand.disc(F32.is_lt(disc, 0.0), disc, b, ctr, alb, refl)
 
-# One mirror, one glossy metal, three diffuse, on a faintly reflective floor.
-def Scene.find(+ro: V.V3, +rd: V.V3) -> Cand:
+def Ball.cand(b: Ball, ro: V.V3, rd: V.V3) -> Cand:
+  match b:
+    case Ball{id, pos, vel, rad, alb, refl}:
+      Sph.cand(ro, rd, pos, rad, alb, refl)
+
+# Every ray walks the whole list, so the cost is the same for all of them and
+# the split stays balanced -- the thing Bend's scheduler cares about.
+def Balls.find(bs: Blobs, +ro: V.V3, +rd: V.V3) -> Cand:
+  match bs:
+    case BNil{}:
+      Void{}
+    case BCons{b, tl}:
+      Cand.closer(Ball.cand(b, ro, rd), Balls.find(tl, ro, rd))
+
+# One mirror, one glossy metal, three diffuse, on a faintly reflective floor,
+# plus whatever the user has dropped in.
+def Scene.find(+balls: Blobs, +ro: V.V3, +rd: V.V3) -> Cand:
   h0 = Plane.cand(ro, rd, V.V3{0.46, 0.46, 0.50}, 0.16)
   h1 = Sph.cand(ro, rd, Scene.c1(), Scene.r1(), V.V3{0.95, 0.96, 0.98}, 0.88)
   h2 = Sph.cand(ro, rd, Scene.c2(), Scene.r2(), V.V3{0.88, 0.22, 0.18}, 0.0)
   h3 = Sph.cand(ro, rd, Scene.c3(), Scene.r3(), V.V3{0.22, 0.40, 0.90}, 0.05)
   h4 = Sph.cand(ro, rd, Scene.c4(), Scene.r4(), V.V3{0.96, 0.74, 0.28}, 0.5)
   h5 = Sph.cand(ro, rd, Scene.c5(), Scene.r5(), V.V3{0.28, 0.74, 0.34}, 0.0)
-  Cand.closer(Cand.closer(h0, h1), Cand.closer(Cand.closer(h2, h3),
-    Cand.closer(h4, h5)))
+  Cand.closer(Cand.closer(Cand.closer(h0, h1), Balls.find(balls, ro, rd)),
+    Cand.closer(Cand.closer(h2, h3), Cand.closer(h4, h5)))
 
 # -- Occlusion-only traversal -------------------------------------------------
 
@@ -205,7 +233,20 @@ def Plane.blocks(ro: V.V3, rd: V.V3) -> Bool:
       +t = (F32.neg(oy) / dy : F32)
       Bool.and(F32.is_gt(t, Scene.EPS()), F32.is_lt(t, Scene.FAR()))
 
-def Scene.shadowed(+ro: V.V3, +rd: V.V3) -> Bool:
+def Ball.blocks(b: Ball, ro: V.V3, rd: V.V3) -> Bool:
+  match b:
+    case Ball{id, pos, vel, rad, alb, refl}:
+      Sph.blocks(ro, rd, pos, rad)
+
+def Balls.shadowed(bs: Blobs, +ro: V.V3, +rd: V.V3) -> Bool:
+  match bs:
+    case BNil{}:
+      False{}
+    case BCons{b, tl}:
+      Bool.or(Ball.blocks(b, ro, rd), Balls.shadowed(tl, ro, rd))
+
+def Scene.shadowed(+balls: Blobs, +ro: V.V3, +rd: V.V3) -> Bool:
+  Bool.or(Balls.shadowed(balls, ro, rd),
   Bool.or(
     Bool.or(Plane.blocks(ro, rd),
       Sph.blocks(ro, rd, Scene.c1(), Scene.r1())),
@@ -213,7 +254,7 @@ def Scene.shadowed(+ro: V.V3, +rd: V.V3) -> Bool:
       Bool.or(Sph.blocks(ro, rd, Scene.c2(), Scene.r2()),
         Sph.blocks(ro, rd, Scene.c3(), Scene.r3())),
       Bool.or(Sph.blocks(ro, rd, Scene.c4(), Scene.r4()),
-        Sph.blocks(ro, rd, Scene.c5(), Scene.r5()))))
+        Sph.blocks(ro, rd, Scene.c5(), Scene.r5())))))
 
 # -- Shading ------------------------------------------------------------------
 
@@ -225,20 +266,21 @@ def Shade.vis.of(blocked: Bool) -> F32:
       1.0
 
 # Only cast the shadow ray when the surface actually faces the light.
-def Shade.vis(lit: Bool, pos: V.V3, nrm: V.V3, l: V.V3) -> F32:
+def Shade.vis(lit: Bool, balls: Blobs, pos: V.V3, nrm: V.V3, l: V.V3) ->
+  F32:
   match lit:
     case False{}:
       0.0
     case True{}:
       Shade.vis.of(
-        Scene.shadowed(V.V3.add(pos, V.V3.scale(nrm, Scene.EPS())), l))
+        Scene.shadowed(balls, V.V3.add(pos, V.V3.scale(nrm, Scene.EPS())), l))
 
 # Lambert against the one directional light, a hard shadow, and a constant
 # ambient term so surfaces facing away are not pure black.
-def Shade.local(pos: V.V3, +nrm: V.V3, alb: V.V3) -> V.V3:
+def Shade.local(balls: Blobs, pos: V.V3, +nrm: V.V3, alb: V.V3) -> V.V3:
   +l = Scene.light()
   +ndl = F32.max(V.V3.dot(nrm, l), 0.0)
-  +vis = Shade.vis(F32.is_gt(ndl, 0.0), pos, nrm, l)
+  +vis = Shade.vis(F32.is_gt(ndl, 0.0), balls, pos, nrm, l)
   V.V3.mul(alb,
     V.V3.add(Scene.ambient(), V.V3.scale(Scene.sun(), (ndl * vis : F32))))
 
@@ -267,13 +309,13 @@ def Trace.dir(rd: V.V3, nrm: V.V3) -> V.V3:
   V.V3.norm(V.V3.reflect(rd, nrm))
 
 # Shading with no further bounce: the end of a chain.
-def Trace.leaf(c: Cand, ro: V.V3, rd: V.V3) -> V.V3:
+def Trace.leaf(balls: Blobs, c: Cand, ro: V.V3, rd: V.V3) -> V.V3:
   match c:
     case Void{}:
       Scene.sky(rd)
     case Cand{+t, ctr, alb, refl, flat}:
       +pos = V.V3.add(ro, V.V3.scale(rd, t))
-      Shade.local(pos, Cand.nrm(flat, pos, ctr), alb)
+      Shade.local(balls, pos, Cand.nrm(flat, pos, ctr), alb)
 
 # -- The reflection recursion -------------------------------------------------
 
@@ -284,14 +326,15 @@ def Trace.leaf(c: Cand, ro: V.V3, rd: V.V3) -> V.V3:
 # `go` carries the decision of whether this bounce is worth taking, computed
 # by the caller from the running weight -- the branch cannot be factored into
 # a helper, because that helper would have to call `Trace` back.
-def Trace(d: Nat, go: Bool, c: Cand, ro: V.V3, +rd: V.V3, w: F32) -> V.V3:
+def Trace(d: Nat, go: Bool, c: Cand, ro: V.V3, +rd: V.V3, w: F32,
+  +balls: Blobs) -> V.V3:
   match d:
     case 0n:
-      Trace.leaf(c, ro, rd)
+      Trace.leaf(balls, c, ro, rd)
     case 1n+p:
       match go:
         case False{}:
-          Trace.leaf(c, ro, rd)
+          Trace.leaf(balls, c, ro, rd)
         case True{}:
           match c:
             case Void{}:
@@ -299,21 +342,21 @@ def Trace(d: Nat, go: Bool, c: Cand, ro: V.V3, +rd: V.V3, w: F32) -> V.V3:
             case Cand{+t, ctr, alb, +refl, flat}:
               +pos = V.V3.add(ro, V.V3.scale(rd, t))
               +nrm = Cand.nrm(flat, pos, ctr)
-              base = Shade.local(pos, nrm, alb)
+              base = Shade.local(balls, pos, nrm, alb)
               +ro2 = Trace.org(pos, nrm)
               +rd2 = Trace.dir(rd, nrm)
-              +c2 = Scene.find(ro2, rd2)
+              +c2 = Scene.find(balls, ro2, rd2)
               +w2 = (w * refl : F32)
               echo = Trace(p,
                 F32.is_gt((w2 * Cand.refl(c2) : F32), Scene.MIN_W()), c2, ro2,
-                rd2, w2)
+                rd2, w2, balls)
               V.V3.lerp(base, echo, F32.clamp(refl, 0.0, 1.0))
 
 # Counts the bounces `Trace` takes on the same inputs, branching the same way.
 # It exists only so the laws can talk about recursion depth: a function
 # returning a colour gives the proof nothing to measure.
-def Trace.depth(d: Nat, go: Bool, c: Cand, ro: V.V3, +rd: V.V3, w: F32) ->
-  Nat:
+def Trace.depth(d: Nat, go: Bool, c: Cand, ro: V.V3, +rd: V.V3, w: F32,
+  +balls: Blobs) -> Nat:
   match d:
     case 0n:
       0n
@@ -330,14 +373,14 @@ def Trace.depth(d: Nat, go: Bool, c: Cand, ro: V.V3, +rd: V.V3, w: F32) ->
               +nrm = Cand.nrm(flat, pos, ctr)
               +ro2 = Trace.org(pos, nrm)
               +rd2 = Trace.dir(rd, nrm)
-              +c2 = Scene.find(ro2, rd2)
+              +c2 = Scene.find(balls, ro2, rd2)
               +w2 = (w * refl : F32)
               1n+Trace.depth(p,
                 F32.is_gt((w2 * Cand.refl(c2) : F32), Scene.MIN_W()), c2, ro2,
-                rd2, w2)
+                rd2, w2, balls)
 
 # The entry point: one primary ray in, one colour out.
-def Trace.start(+ro: V.V3, +rd: V.V3) -> V.V3:
-  +c = Scene.find(ro, rd)
+def Trace.start(+balls: Blobs, +ro: V.V3, +rd: V.V3) -> V.V3:
+  +c = Scene.find(balls, ro, rd)
   Trace(Scene.MAX_DEPTH(), F32.is_gt(Cand.refl(c), Scene.MIN_W()), c, ro, rd,
-    1.0)
+    1.0, balls)

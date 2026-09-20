@@ -72,29 +72,32 @@ law tile_pixels:
   for +x: U32
   for +y: U32
   for +bs: R.Basis
-  {R.Img.count(d, R.Render.tile(d, step, x, y, bs)) == Nat.pow(4n, d) : Nat}
+  for +balls: S.Blobs
+  {R.Img.count(d, R.Render.tile(d, step, x, y, bs, balls)) ==
+    Nat.pow(4n, d) : Nat}
 
-def tile_pixels(d, step, x, y, bs):
+def tile_pixels(d, step, x, y, bs, balls):
   match d:
     case 0n:
       {==}
     case 1n+p:
       +h = U32.shr(step)
       add4(
-        R.Img.count(p, R.Render.tile(p, h, x, y, bs)),
-        R.Img.count(p, R.Render.tile(p, h, (x + h : U32), y, bs)),
-        R.Img.count(p, R.Render.tile(p, h, x, (y + h : U32), bs)),
-        R.Img.count(p, R.Render.tile(p, h, (x + h : U32), (y + h : U32), bs)),
+        R.Img.count(p, R.Render.tile(p, h, x, y, bs, balls)),
+        R.Img.count(p, R.Render.tile(p, h, (x + h : U32), y, bs, balls)),
+        R.Img.count(p, R.Render.tile(p, h, x, (y + h : U32), bs, balls)),
+        R.Img.count(p,
+          R.Render.tile(p, h, (x + h : U32), (y + h : U32), bs, balls)),
         Nat.pow(4n, p),
-        tile_pixels(p, h, x, y, bs),
-        tile_pixels(p, h, (x + h : U32), y, bs),
-        tile_pixels(p, h, x, (y + h : U32), bs),
-        tile_pixels(p, h, (x + h : U32), (y + h : U32), bs))
+        tile_pixels(p, h, x, y, bs, balls),
+        tile_pixels(p, h, (x + h : U32), y, bs, balls),
+        tile_pixels(p, h, x, (y + h : U32), bs, balls),
+        tile_pixels(p, h, (x + h : U32), (y + h : U32), bs, balls))
 
-def Laws.frame_pixels(d, c):
+def Laws.frame_pixels(d, c, balls):
   tile_pixels(d, R.Render.size(d), 0, 0,
     R.Basis.of(c, U32.to_f32(R.Render.WIDTH()),
-      U32.to_f32(R.Render.HEIGHT())))
+      U32.to_f32(R.Render.HEIGHT())), balls)
 
 # -- Law 2: colour channels are bounded ---------------------------------------
 
@@ -175,9 +178,10 @@ law depth_le:
   for +ro: V.V3
   for +rd: V.V3
   for +w: F32
-  {Nat.is_le(S.Trace.depth(d, go, c, ro, rd, w), d) == True{} : Bool}
+  for +balls: S.Blobs
+  {Nat.is_le(S.Trace.depth(d, go, c, ro, rd, w, balls), d) == True{} : Bool}
 
-def depth_le(d, go, c, ro, rd, w):
+def depth_le(d, go, c, ro, rd, w, balls):
   match d:
     case 0n:
       {==}
@@ -194,11 +198,11 @@ def depth_le(d, go, c, ro, rd, w):
               +nrm = S.Cand.nrm(flat, pos, ctr)
               +ro2 = S.Trace.org(pos, nrm)
               +rd2 = S.Trace.dir(rd, nrm)
-              +c2 = S.Scene.find(ro2, rd2)
+              +c2 = S.Scene.find(balls, ro2, rd2)
               +w2 = (w * refl : F32)
               depth_le(p,
                 F32.is_gt((w2 * S.Cand.refl(c2) : F32), S.Scene.MIN_W()), c2,
-                ro2, rd2, w2)
+                ro2, rd2, w2, balls)
 
-def Laws.bounce_depth(go, c, ro, rd, w):
-  depth_le(S.Scene.MAX_DEPTH(), go, c, ro, rd, w)
+def Laws.bounce_depth(go, c, ro, rd, w, balls):
+  depth_le(S.Scene.MAX_DEPTH(), go, c, ro, rd, w, balls)

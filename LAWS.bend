@@ -15,6 +15,9 @@ import ./vec.bend as V
 import ./scene.bend as S
 import ./render.bend as R
 
+# The laws hold for any set of balls the user has dropped in, not just for the
+# fixed scene: `frame_pixels` and `bounce_depth` both quantify over the list.
+#
 # 1. The output always has exactly width * height pixels.
 #
 # A frame is a quadtree `d` levels deep over a 2^d square, so width * height
@@ -24,7 +27,8 @@ import ./render.bend as R
 law frame_pixels:
   for +d: Nat
   for +c: R.Cam
-  {R.Img.count(d, R.Render.at(d, c)) == Nat.pow(4n, d) : Nat}
+  for +balls: S.Blobs
+  {R.Img.count(d, R.Render.at(d, c, balls)) == Nat.pow(4n, d) : Nat}
 
 # 2. Every colour channel is clamped to 0-255.
 #
@@ -62,5 +66,6 @@ law bounce_depth:
   for +ro: V.V3
   for +rd: V.V3
   for +w: F32
-  {Nat.is_le(S.Trace.depth(S.Scene.MAX_DEPTH(), go, c, ro, rd, w),
+  for +balls: S.Blobs
+  {Nat.is_le(S.Trace.depth(S.Scene.MAX_DEPTH(), go, c, ro, rd, w, balls),
     S.Scene.MAX_DEPTH()) == True{} : Bool}

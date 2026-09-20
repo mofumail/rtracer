@@ -217,16 +217,35 @@ def Basis.of(c: Cam, +vw: F32, +vh: F32) -> Basis:
   Basis{eye, fwd, rgt, V.V3.cross(rgt, fwd), hx, hy,
     (2.0 * hx / vw : F32), (2.0 * hy / vh : F32)}
 
-def Render.pixel(bs: Basis, x: U32, y: U32) -> U32:
+# The direction of the primary ray through a pixel. Shared with the spawner
+# in main.bend, so a shift-click aims at exactly the pixel under the cursor.
+def Render.ray(bs: Basis, x: U32, y: U32) -> V.V3:
   match bs:
     case Basis{eye, fwd, rgt, upv, hx, hy, ix, iy}:
       # Pixel centres on the image plane; y is flipped because the window's
       # rows run downwards.
       +u = ((U32.to_f32(x) + 0.5) * ix - hx : F32)
       +v = (hy - (U32.to_f32(y) + 0.5) * iy : F32)
+      V.V3.norm(V.V3.add(fwd,
+        V.V3.add(V.V3.scale(rgt, u), V.V3.scale(upv, v))))
+
+def Basis.eye(bs: Basis) -> V.V3:
+  match bs:
+    case Basis{eye, fwd, rgt, upv, hx, hy, ix, iy}:
+      eye
+
+# Destructures the Basis once rather than taking it `+` and calling
+# `Basis.eye` and `Render.ray` on it. Those two read well, but using the
+# record twice here duplicates it at every one of the frame's millions of
+# leaves, which measured 51 ms/frame against 22 ms.
+def Render.pixel(bs: Basis, balls: S.Blobs, x: U32, y: U32) -> U32:
+  match bs:
+    case Basis{eye, fwd, rgt, upv, hx, hy, ix, iy}:
+      +u = ((U32.to_f32(x) + 0.5) * ix - hx : F32)
+      +v = (hy - (U32.to_f32(y) + 0.5) * iy : F32)
       rd = V.V3.norm(V.V3.add(fwd,
         V.V3.add(V.V3.scale(rgt, u), V.V3.scale(upv, v))))
-      Color.pack(S.Trace.start(eye, rd))
+      Color.pack(S.Trace.start(balls, eye, rd))
 
 # -- The quadtree -------------------------------------------------------------
 
@@ -235,16 +254,17 @@ def Render.pixel(bs: Basis, x: U32, y: U32) -> U32:
 # every quadrant is the same size and every leaf costs the same ray. That is
 # what Bend's fork-join scheduler needs to spread the frame over every core or
 # GPU lane.
-def Render.tile(+d: Nat, +step: U32, +x: U32, +y: U32, +bs: Basis) -> Image:
+def Render.tile(+d: Nat, +step: U32, +x: U32, +y: U32, +bs: Basis,
+  +balls: S.Blobs) -> Image:
   match d:
     case 0n:
-      Pix{Render.pixel(bs, x, y)}
+      Pix{Render.pixel(bs, balls, x, y)}
     case 1n+p:
       +h = U32.shr(step)
-      tl tr bl br = Render.tile(p, h, x, y, bs)
-        Render.tile(p, h, (x + h : U32), y, bs)
-        Render.tile(p, h, x, (y + h : U32), bs)
-        Render.tile(p, h, (x + h : U32), (y + h : U32), bs)
+      tl tr bl br = Render.tile(p, h, x, y, bs, balls)
+        Render.tile(p, h, (x + h : U32), y, bs, balls)
+        Render.tile(p, h, x, (y + h : U32), bs, balls)
+        Render.tile(p, h, (x + h : U32), (y + h : U32), bs, balls)
       Qua{tl, tr, bl, br}
 
 def Render.size(+d: Nat) -> U32:
@@ -258,15 +278,21 @@ def Render.size(+d: Nat) -> U32:
 # serial loop on the CPU and a CUDA kernel on the GPU. Rendering on the CPU
 # with the GPU enabled is worse than either, because the corpus then lives in
 # managed memory and every CPU thread pays for it.
-def Render.at(+d: Nat, c: Cam) -> Image:
+def Render.at(+d: Nat, c: Cam, +balls: S.Blobs) -> Image:
   Render.tile!(d, Render.size(d), 0, 0,
-    Basis.of(c, U32.to_f32(Render.WIDTH()), U32.to_f32(Render.HEIGHT())))
+    Basis.of(c, U32.to_f32(Render.WIDTH()), U32.to_f32(Render.HEIGHT())),
+    balls)
 
 # There is only one resolution. An earlier version dropped to a shallower
 # tree while the mouse was down; at depth 11 the frame holds ~40 fps, so the
 # quality never has to drop.
-def Render.frame(c: Cam) -> Image:
-  Render.at(Render.FULL_D(), c)
+def Render.frame(c: Cam, +balls: S.Blobs) -> Image:
+  Render.at(Render.FULL_D(), c, balls)
+
+# The camera frame for the live window, used by the spawner to turn a clicked
+# pixel back into a world-space ray.
+def Render.basis(c: Cam) -> Basis:
+  Basis.of(c, U32.to_f32(Render.WIDTH()), U32.to_f32(Render.HEIGHT()))
 
 # -- Frame shape --------------------------------------------------------------
 
