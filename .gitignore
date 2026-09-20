@@ -2,6 +2,11 @@ rtracer
 rtracer.gpu
 bench
 bench.gpu
+probe
+probe.gpu
+
+# any Bend GPU program sitting next to its binary
+*.gpu
 *.c
 *.js
 
