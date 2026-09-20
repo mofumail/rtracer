@@ -1,11 +1,13 @@
 # The interactive viewer: an App whose view renders a frame and whose tick
 # folds the window's events into the camera.
 #
-# The rendered Image is kept in the state. `App.run` calls view once per frame
-# at 60 Hz, so re-tracing every frame would keep the GPU busy drawing the same
-# picture; instead the state carries a `dirty` flag and view hands back the
-# cached tree until an event moves the camera. Image is Data, so the cached
-# copy is a refcount bump, not a copy of the tree.
+# Every frame is traced fresh. An earlier version cached the rendered Image in
+# the state and only re-traced when an event moved the camera, which looked
+# like a clear win -- until it was measured. `view` has to return the state
+# *and* the image, so a cached frame has to be used twice, and marking a
+# freshly computed Image `+` turns out to cost far more than tracing it again:
+# frames during a drag took 206 ms against 22 ms without the cache. Caching
+# was making the interactive case 9x slower than not caching at all.
 #
 # Zoom is on the right mouse button rather than the wheel. Bend 2.0.5 cannot
 # see the wheel at all: X11 reports it as buttons 4 and 5, and Bend's event
@@ -47,11 +49,10 @@ type Drag is Data:
   DZoom{}
 
 type St is Data:
-  St{cam: R.Cam, drag: Drag, mx: U32, my: U32, img: Image, dirty: Bool,
-    live: Bool}
+  St{cam: R.Cam, drag: Drag, mx: U32, my: U32, live: Bool}
 
 def St.init() -> St:
-  St{R.Cam{450, 1005, 780}, DNone{}, 0, 0, Pix{0}, True{}, True{}}
+  St{R.Cam{450, 1005, 780}, DNone{}, 0, 0, True{}}
 
 def Drag.of.go(left: Bool, right: Bool) -> Drag:
   match left right:
@@ -97,75 +98,76 @@ def St.turn(c: R.Cam, +x: U32, +y: U32, +mx: U32, +my: U32) -> R.Cam:
         dist}
 
 def St.move.go(drag: Drag, +x: U32, +y: U32, cam: R.Cam, +mx: U32, +my: U32,
-  img: Image, dirty: Bool, live: Bool) -> St:
+  live: Bool) -> St:
   match drag:
     case DNone{}:
-      St{cam, DNone{}, x, y, img, dirty, live}
+      St{cam, DNone{}, x, y, live}
     case DOrbit{}:
-      St{St.turn(cam, x, y, mx, my), DOrbit{}, x, y, img, True{}, live}
+      St{St.turn(cam, x, y, mx, my), DOrbit{}, x, y, live}
     case DZoom{}:
       # Dragging down pulls the camera back.
       St{St.dolly(cam, (Delta(y, my) * Ui.DOLLY() : U32), U32.is_gt(y, my)),
-        DZoom{}, x, y, img, True{}, live}
+        DZoom{}, x, y, live}
 
 def St.move(x: U32, y: U32, s: St) -> St:
   match s:
-    case St{cam, drag, mx, my, img, dirty, live}:
-      St.move.go(drag, x, y, cam, mx, my, img, dirty, live)
+    case St{cam, drag, mx, my, live}:
+      St.move.go(drag, x, y, cam, mx, my, live)
 
-# Pressing starts a drag, releasing ends it. Releasing no longer forces a
-# redraw: there is only one resolution now, so the frame on screen is already
-# the final one.
+# Pressing starts a drag, releasing ends it.
 def St.press.go(down: Bool, button: U32, x: U32, y: U32, cam: R.Cam,
-  img: Image, dirty: Bool, live: Bool) -> St:
+  live: Bool) -> St:
   match down:
     case True{}:
-      St{cam, Drag.of(button), x, y, img, dirty, live}
+      St{cam, Drag.of(button), x, y, live}
     case False{}:
-      St{cam, DNone{}, x, y, img, dirty, live}
+      St{cam, DNone{}, x, y, live}
 
 def St.press(x: U32, y: U32, button: U32, down: Bool, s: St) -> St:
   match s:
-    case St{cam, drag, mx, my, img, dirty, live}:
-      St.press.go(down, button, x, y, cam, img, dirty, live)
+    case St{cam, drag, mx, my, live}:
+      St.press.go(down, button, x, y, cam, live)
 
 def St.key.go(quit: Bool, zin: Bool, zout: Bool, cam: R.Cam, drag: Drag,
-  mx: U32, my: U32, img: Image, dirty: Bool, live: Bool) -> St:
+  mx: U32, my: U32, live: Bool) -> St:
   match quit zin zout:
     case True{} _ _:
-      St{cam, drag, mx, my, img, dirty, False{}}
+      St{cam, drag, mx, my, False{}}
     case False{} True{} _:
-      St{St.dolly(cam, Ui.ZOOM(), False{}), drag, mx, my, img, True{}, live}
+      St{St.dolly(cam, Ui.ZOOM(), False{}), drag, mx, my, live}
     case False{} False{} True{}:
-      St{St.dolly(cam, Ui.ZOOM(), True{}), drag, mx, my, img, True{}, live}
+      St{St.dolly(cam, Ui.ZOOM(), True{}), drag, mx, my, live}
     case False{} False{} False{}:
-      St{cam, drag, mx, my, img, dirty, live}
+      St{cam, drag, mx, my, live}
 
 def St.key.act(act: Bool, +code: U32, cam: R.Cam, drag: Drag, mx: U32,
-  my: U32, img: Image, dirty: Bool, live: Bool) -> St:
+  my: U32, live: Bool) -> St:
   match act:
     case False{}:
-      St{cam, drag, mx, my, img, dirty, live}
+      St{cam, drag, mx, my, live}
     case True{}:
       St.key.go(U32.is_eq(code, Ui.KEY_ESC()), U32.is_eq(code, Ui.KEY_UP()),
-        U32.is_eq(code, Ui.KEY_DOWN()), cam, drag, mx, my, img, dirty, live)
+        U32.is_eq(code, Ui.KEY_DOWN()), cam, drag, mx, my, live)
 
 def St.key(code: U32, down: Bool, s: St) -> St:
   match s:
-    case St{cam, drag, mx, my, img, dirty, live}:
-      St.key.act(down, code, cam, drag, mx, my, img, dirty, live)
+    case St{cam, drag, mx, my, live}:
+      St.key.act(down, code, cam, drag, mx, my, live)
 
-def St.done.go(live: Bool, s: St) -> Maybe<St>:
+# Takes the state apart and puts it back rather than marking it `+` and using
+# it twice: marking a record reusable to read one field out of it is not free.
+def St.done.go(live: Bool, cam: R.Cam, drag: Drag, mx: U32, my: U32) ->
+  Maybe<St>:
   match live:
     case True{}:
-      Some{s}
+      Some{St{cam, drag, mx, my, True{}}}
     case False{}:
       None{}
 
-def St.done(+s: St) -> Maybe<St>:
+def St.done(s: St) -> Maybe<St>:
   match s:
-    case St{cam, drag, mx, my, img, dirty, live}:
-      St.done.go(live, s)
+    case St{cam, drag, mx, my, live}:
+      St.done.go(live, cam, drag, mx, my)
 
 # The event fold. The dispatch is written out inside the loop because Bend
 # forbids mutual recursion, so a per-event helper could not call back here.
@@ -186,20 +188,11 @@ def St.step(evs: List<Event>, s: St) -> Maybe<St>:
 
 # -- The App ------------------------------------------------------------------
 
-def View.go(dirty: Bool, drag: Drag, +cam: R.Cam, mx: U32, my: U32,
-  img: Image, live: Bool) -> Pair(St, Image):
-  match dirty:
-    case False{}:
-      +img = img
-      (St{cam, drag, mx, my, img, False{}, live}, img)
-    case True{}:
-      +new = R.Render.frame(cam)
-      (St{cam, drag, mx, my, new, False{}, live}, new)
-
 def View(s: St) -> Pair(St, Image):
   match s:
-    case St{cam, drag, mx, my, img, dirty, live}:
-      View.go(dirty, drag, cam, mx, my, img, live)
+    case St{cam, drag, mx, my, live}:
+      +cam = cam
+      (St{cam, drag, mx, my, live}, R.Render.frame(cam))
 
 def Tick(evs: List<Event>, s: St) -> IO(Maybe<St>):
   IO.pure(Maybe<St>, St.step(evs, s))

@@ -5,6 +5,7 @@
 #   ./run.sh proof     just run the proof gate
 #   ./run.sh build     just build the binaries
 #   ./run.sh bench     build, then time the renderer on 1 core, all cores and the GPU
+#   ./run.sh probe     run the viewer with a live frames-per-second readout
 #   ./run.sh doctor    report what the toolchain looks like and stop
 
 set -euo pipefail
@@ -76,6 +77,24 @@ build() {
   echo "built ./rtracer and ./bench"
 }
 
+# Prints a frames-per-second line every second, so a slow frame rate can be
+# measured instead of guessed at. Drag the window while this runs.
+probe() {
+  echo "== building the probe viewer =="
+  bend probe.bend -o probe
+  echo "== drag the window; fps is printed once a second, Esc quits =="
+  ./probe "$@" | awk '
+    /^[0-9]+$/ {
+      n += 1
+      if (t0 == 0) { t0 = $1; last = $1; next }
+      if ($1 - t0 >= 1000) {
+        ms = ($1 - t0) / n
+        printf "  %5.1f fps   (%4.1f ms/frame, %d frames)\n", 1000 / ms, ms, n; fflush()
+        t0 = $1; n = 0
+      }
+    }'
+}
+
 bench() {
   echo "(headless trace only, with a forcing pass -- not frame times)"
   echo "== 1) CPU, single thread =="
@@ -90,6 +109,7 @@ bench() {
 
 case "${1:-all}" in
   doctor) doctor ;;
+  probe)  shift; probe "$@" ;;
   proof)  proof ;;
   build)  build ;;
   bench)  build; bench ;;
@@ -98,5 +118,5 @@ case "${1:-all}" in
           echo "   (the mouse wheel cannot be used -- Bend 2.0.5 discards wheel"
           echo "    events before a program sees them; see NOTES-BEND.md)"
           ./rtracer ;;
-  *)      echo "usage: $0 [all|doctor|proof|build|bench]" >&2; exit 2 ;;
+  *)      echo "usage: $0 [all|doctor|proof|build|bench|probe]" >&2; exit 2 ;;
 esac

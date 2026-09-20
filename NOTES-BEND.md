@@ -184,7 +184,57 @@ CPU threads, which is the reverse of the ratio for the arithmetic.
 
 ---
 
-### 9. Unexplained: the same frame costs ~4x less inside a window app
+### 9. Marking a freshly-computed Image `+` costs ~9x re-computing it
+
+The viewer cached its rendered frame in the app state, so that a frame with no
+camera change could be handed back instead of re-traced. `App`'s `view` must
+return the state *and* the image, so the cached frame is used twice and has to
+be `+`:
+
+```python
+case True{}:
+  +new = R.Render.frame(cam)                      # used twice, below
+  (St{cam, drag, mx, my, new, False{}, live}, new)
+```
+
+Measured at 1920x1080, dragging (so every frame is a fresh trace):
+
+* with the cache: **206 ms/frame**
+* without it, tracing every frame unconditionally: **22 ms/frame**
+
+So the cache made the interactive case about 9x *slower* than not caching. An
+idle frame, where the `+` falls on an Image that is already evaluated, stays
+cheap (16.7 ms) — it is specifically duplicating a *freshly computed* Image
+that is expensive, which is consistent with the duplication copying the
+pending computation rather than a finished value. Re-tracing 4.19M pixels is
+cheaper than `+` on the tree they live in.
+
+This is a nasty one to find, because the cache is an obvious optimization,
+the code reads as correct, and the cost shows up only under interaction. A
+diagnostic for "this `+` duplicated a redex rather than a value" would have
+saved hours.
+
+---
+
+### 10. Pruning an unbalanced quadtree is much worse than wasting the work
+
+A 1920x1080 window means a 2048x2048 tree, so ~51% of the leaves are never
+shown. Skipping any tile whose origin is past the visible rectangle — an O(1)
+`Pix{0}` instead of a subtree — should halve the work. Measured:
+
+* full tree, every leaf traced: **22 ms/frame**
+* off-screen tiles pruned: **62 ms/frame**
+
+Pruning is *three times slower* than doing the wasted work. This is the
+fork-join scheduler behaving exactly as the guide warns — every task is handed
+to a core once and never moved — but the size of the penalty is worth knowing:
+an unbalanced split does not merely lose the speed-up, it costs far more than
+the work it saves. Anything that prunes, early-exits or varies per-tile cost
+needs to keep the split balanced or not bother.
+
+---
+
+### 11. Unexplained: the same frame costs ~4x less inside a window app
 
 Rendering depth 10 (1024x1024) with `--gpu off --threads 1`:
 

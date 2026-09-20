@@ -86,14 +86,18 @@ Two details worth knowing:
   corner is shown. The rays are aimed at the *visible* rectangle rather than
   at the square, so the picture stays centred and correctly proportioned; the
   extra columns and rows are simply traced and never looked at.
-* **The ~50% waste is not fixable by pruning.** Skipping the off-screen
-  quadrants would halve the rays, but it unbalances the split, and Bend's
-  scheduler hands every task to a core once and never moves it — the idle
-  lanes give the saving straight back.
+* **The ~50% waste is not fixable by pruning — it is measured, not assumed.**
+  Skipping tiles whose origin is past the visible rectangle halves the rays and
+  makes the frame *three times slower*: 62 ms against 22 ms. Bend's scheduler
+  hands every task to a core once and never moves it, so an unbalanced split
+  costs far more than the work it saves.
 
-The frame is cached in the app state and only re-rendered when an event moves
-the camera; `App.run` calls `view` at 60 Hz, and re-tracing an unchanged scene
-every frame would keep the GPU busy for nothing.
+**Every frame is traced fresh — there is deliberately no frame cache.** An
+earlier version cached the rendered Image in the app state and only re-traced
+when an event moved the camera. Measured, that was 9x *slower* while dragging:
+`view` must return the state and the image, so a cached frame is used twice and
+has to be marked `+`, and duplicating a freshly computed Image costs far more
+than tracing it again — 206 ms/frame against 22 ms. See `NOTES-BEND.md` §9.
 
 ### Why the GPU, when the CPU traces rays faster
 
@@ -112,14 +116,17 @@ at 38 ms against 26 ms for the same work with `--gpu off`.
 
 ## Benchmarks
 
-**What you actually feel** — time per frame in the running app at 1920×1080,
-full resolution, camera moving every frame (so nothing is served from cache):
+**What you actually feel** — measure it yourself with `./run.sh probe`, which
+prints a frames-per-second line every second while you drag.
 
-| backend | ms/frame | |
-| --- | ---: | --- |
-| GPU (default) | **17** | ~59 fps — what ships |
-| CPU, 32 threads, `--gpu off` | 44 | ~23 fps |
-| CPU, 1 thread, `--gpu off --threads 1` | 74 | ~14 fps |
+At 1920×1080 on the GPU, dragging continuously: **46–51 fps** (20–22 ms/frame),
+steady, with no dips. At 1024×1024 it is vsync-capped at a flat 60 fps.
+
+60 fps at 2K is not reachable with Bend's `Image`: replacing the entire ray
+tracer with `Pix{(x + y : U32)}` still costs 22 ms/frame, so the quadtree
+allocation alone caps a 2048² frame at about 45 fps. The jump is a cliff, not a
+slope — the window picks `k` from `2^k ≥ max(w,h)`, so anything above 1024 in
+either axis builds a 2048² tree with 4× the nodes.
 
 The GPU wins end to end even though the CPU traces rays faster, because the
 window's blit is a serial loop on the CPU and a CUDA kernel on the GPU. See
